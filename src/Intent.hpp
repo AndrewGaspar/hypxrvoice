@@ -40,6 +40,14 @@ struct SRawIntent {
     std::string note;
 };
 
+// Sanitize a model-proposed move_dist delta against the utterance itself. The GBNF
+// grammar constrains deltaM to be *a number*, not a sane one — a live 3B run emitted
+// +100 for "closer" (wrong sign AND magnitude). Direction words in the utterance are
+// authoritative ("closer/nearer/bring" => negative, "further/farther/away/back/push"
+// => positive); magnitude is clamped to [0.05, 1.0] m, falling back to `step` when
+// the model's value is absent or absurd. Pure and unit-tested.
+double sanitizeDeltaM(double modelDelta, const std::string& utterance, double step);
+
 // A located deictic word: which instant to query the gaze ring at, and whether it is
 // a place-deixis ("here"/"there") vs a monitor-deixis ("this"/"that").
 struct SDeicticHit {

@@ -109,6 +109,102 @@ TEST_CASE("context: digest is compact and enumerates names") {
     CHECK_FALSE(c.hasMonitor("XR-nope"));
 }
 
+// ---- Generic-name fixtures: names carry NO content signal; only the client
+// context (classes, window titles, workspaces) can disambiguate. This encodes the
+// user directive: "it should also look at the context of which clients are on
+// which monitor", with auto-assigned names like XR-1/XR-2/XR-3.
+namespace {
+    const char* kGenericMons = R"json([
+        {"id":3,"name":"XR-1","focused":false},
+        {"id":4,"name":"XR-2","focused":false},
+        {"id":5,"name":"XR-3","focused":false}
+    ])json";
+    const char* kGenericClients = R"json([
+        {"class":"mpv","title":"family-video.mp4 - mpv","monitor":3,"mapped":true},
+        {"class":"nvim","title":"main.cpp - ~/code/hypxrland - NVIM","monitor":4,"mapped":true},
+        {"class":"ghostty","title":"~/code/hypxrland","monitor":4,"mapped":true},
+        {"class":"chromium","title":"YouTube - Big Buck Bunny - Chromium","monitor":5,"mapped":true}
+    ])json";
+
+    SDesktopContext genericFixture() {
+        return SDesktopContext::parse(kGenericMons, kGenericClients, "");
+    }
+}
+
+TEST_CASE("context: generic names — client context alone disambiguates") {
+    SDesktopContext c = genericFixture();
+
+    // "the coding monitor": no name matches anything; the nvim/ghostty monitor's
+    // titles carry the project dir (~/code/…), which is the only lexical signal.
+    SMonitorMatch coding = c.resolveMonitor("the coding monitor");
+    CHECK(coding.matched);
+    CHECK(coding.name == "XR-2");
+    CHECK(coding.candidates.empty());
+
+    // "youtube": lives only in the chromium window TITLE (class carries nothing).
+    SMonitorMatch yt = c.resolveMonitor("youtube");
+    CHECK(yt.matched);
+    CHECK(yt.name == "XR-3");
+
+    // "the video monitor": the mpv title token "video".
+    SMonitorMatch vid = c.resolveMonitor("the video monitor");
+    CHECK(vid.matched);
+    CHECK(vid.name == "XR-1");
+}
+
+TEST_CASE("context: name-coincidence trap — content beats a partial name hit") {
+    // Auto-named XR-code is actually PLAYING A VIDEO; the real editor (nvim/ghostty,
+    // project dir in titles) lives on generic XR-2. "the coding monitor" must go to
+    // the editor: a fuzzy name resemblance (coding~code, 0.5) may not dominate a
+    // genuine content match (1.0).
+    const char* mons = R"json([
+        {"id":3,"name":"XR-code","focused":false},
+        {"id":4,"name":"XR-2","focused":false}
+    ])json";
+    const char* cls = R"json([
+        {"class":"mpv","title":"family-video.mp4 - mpv","monitor":3,"mapped":true},
+        {"class":"nvim","title":"main.cpp - ~/code/hypxrland - NVIM","monitor":4,"mapped":true},
+        {"class":"ghostty","title":"~/code/hypxrland","monitor":4,"mapped":true}
+    ])json";
+    SDesktopContext c = SDesktopContext::parse(mons, cls, "");
+
+    SMonitorMatch coding = c.resolveMonitor("the coding monitor");
+    CHECK(coding.matched);
+    CHECK(coding.name == "XR-2"); // content wins over the name coincidence
+
+    // But the LITERAL name stays decisive: "code" is an exact, distinctive name
+    // token of XR-code — the user said the monitor's name, so the name wins even
+    // though something else is playing on it.
+    SMonitorMatch literal = c.resolveMonitor("the code monitor");
+    CHECK(literal.matched);
+    CHECK(literal.name == "XR-code");
+
+    // Full-name reference on a generic name also stays decisive.
+    SMonitorMatch full = c.resolveMonitor("XR-2");
+    CHECK(full.matched);
+    CHECK(full.name == "XR-2");
+}
+
+TEST_CASE("context: digest includes salient title keywords alongside classes") {
+    SDesktopContext c = genericFixture();
+    std::string d = c.digest();
+    // Classes still listed…
+    CHECK(d.find("chromium") != std::string::npos);
+    CHECK(d.find("nvim") != std::string::npos);
+    // …and title keywords now too (this is where "YouTube"/project dirs live).
+    CHECK(d.find("youtube") != std::string::npos);
+    CHECK(d.find("titles=") != std::string::npos);
+    // Class-duplicate tokens are not repeated in titles= (mpv is a class; its title
+    // token "mpv" must not re-appear as a keyword).
+    size_t line = d.find("XR-1");
+    REQUIRE(line != std::string::npos);
+    size_t nl = d.find('\n', line);
+    std::string xr1 = d.substr(line, nl - line);
+    CHECK(xr1.find("titles=") != std::string::npos);
+    CHECK(xr1.find("video") != std::string::npos);
+    CHECK(xr1.find("mpv") == xr1.rfind("mpv")); // "mpv" appears once (the class)
+}
+
 TEST_CASE("context: degrades gracefully with empty/invalid blobs") {
     SDesktopContext c = SDesktopContext::parse("", "", "");
     CHECK(c.monitors.empty());

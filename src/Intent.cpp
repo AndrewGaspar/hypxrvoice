@@ -1,6 +1,7 @@
 #include "Intent.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 
 namespace {
@@ -44,6 +45,27 @@ namespace {
                 return true;
         return false;
     }
+}
+
+double sanitizeDeltaM(double modelDelta, const std::string& utterance, double step) {
+    std::string low;
+    low.reserve(utterance.size());
+    for (char c : utterance)
+        low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    // Magnitude: model value if sane, else the configured step.
+    double mag = std::abs(modelDelta);
+    if (mag < 0.05 || mag > 1.0)
+        mag = std::abs(step) > 0.0 ? std::abs(step) : 0.25;
+
+    // Direction: the utterance is authoritative when it contains a direction word.
+    auto has = [&](const char* w) { return low.find(w) != std::string::npos; };
+    if (has("closer") || has("nearer") || has("bring") || has("come here"))
+        return -mag;
+    if (has("further") || has("farther") || has("away") || has("back") || has("push"))
+        return +mag;
+    // No lexical direction: trust the model's sign (negative default if zero).
+    return modelDelta < 0 ? -mag : (modelDelta > 0 ? +mag : -mag);
 }
 
 SDeicticHit findDeictic(const STranscript& t) {

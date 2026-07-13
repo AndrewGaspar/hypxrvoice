@@ -161,3 +161,17 @@ TEST_CASE("intent: ambiguous target keeps a best guess but marks low confidence"
     // A best guess is still emitted (feedback shows the alternatives).
     CHECK((a.target == "XR-a" || a.target == "XR-b"));
 }
+
+TEST_CASE("intent: sanitizeDeltaM — utterance direction is authoritative, magnitude clamped") {
+    // The live bug: model said +100 for "closer" — direction flipped, magnitude reset.
+    CHECK(sanitizeDeltaM(100.0, "move the coding monitor closer", 0.25) == doctest::Approx(-0.25));
+    // Sane model value with matching direction passes through (sign from utterance).
+    CHECK(sanitizeDeltaM(-0.1, "bring it closer", 0.25) == doctest::Approx(-0.1));
+    CHECK(sanitizeDeltaM(0.1, "push it further away", 0.25) == doctest::Approx(0.1));
+    // Model sign disagrees with the utterance: utterance wins.
+    CHECK(sanitizeDeltaM(0.3, "a bit closer please", 0.25) == doctest::Approx(-0.3));
+    // No direction word: model sign trusted, magnitude clamped.
+    CHECK(sanitizeDeltaM(-50.0, "adjust the distance", 0.25) == doctest::Approx(-0.25));
+    // Zero/absent value: step magnitude, default pull.
+    CHECK(sanitizeDeltaM(0.0, "adjust it", 0.25) == doctest::Approx(-0.25));
+}

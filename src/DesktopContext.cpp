@@ -210,37 +210,76 @@ SMonitorMatch SDesktopContext::resolveMonitor(const std::string& phrase) const {
     if (ptoks.empty() || monitors.empty())
         return res;
 
-    // Score each monitor: a phrase token scores if it matches any name/class/title
-    // token. Name matches weigh more than app matches so "XR-code" beats an app that
-    // merely mentions "code". Distinct phrase tokens matched drives the score, so a
-    // 2-word reference that hits two facets ranks above a 1-word coincidence.
+    // WEIGHTING RATIONALE (user directive: monitor names are often generic or
+    // auto-assigned, so what is RUNNING on a monitor matters more than a fuzzy
+    // resemblance to its name):
+    //   * exact name token / content (class/title/workspace) hit .. 1.0 per token
+    //   * partial (fuzzy) name-token hit ........................... 0.5 per token
+    //   * STRONG-NAME bonus ........................................ +3.0 flat
+    // The strong-name bonus fires only when the user literally spoke the monitor's
+    // name: either the phrase exactly covers ALL of its name tokens ("XR-1"), or a
+    // phrase token exactly equals a DISTINCTIVE name token — one no other monitor's
+    // name carries ("the main monitor" vs XR-main; family prefixes like "xr" are
+    // shared and never distinctive). So a literal name stays decisive, while a mere
+    // name coincidence (auto-named XR-code that is actually playing a video) loses
+    // to the monitor genuinely running the referenced content: partial-name 0.5 <
+    // content 1.0. Per token the best interpretation wins (max, not sum), so one
+    // word can't double-dip name+content.
+
+    // Name-token distinctiveness across the snapshot.
+    std::unordered_map<std::string, int> nameTokFreq;
+    for (auto& m : monitors) {
+        std::set<std::string> uniq;
+        for (auto& t : tokenize(m.name))
+            uniq.insert(t);
+        for (auto& t : uniq)
+            nameTokFreq[t]++;
+    }
+
     struct Scored { const SMonitorInfo* mon; double score; int distinctHits; };
     std::vector<Scored> scored;
     for (auto& m : monitors) {
         std::vector<std::string> nameToks = tokenize(m.name);
-        std::vector<std::string> appToks;
+        std::vector<std::string> contentToks;
         for (auto& c : m.appClasses)
             for (auto& t : tokenize(c))
-                appToks.push_back(t);
+                contentToks.push_back(t);
         for (auto& t : m.appTitles)
             for (auto& tk : tokenize(t))
-                appToks.push_back(tk);
+                contentToks.push_back(tk);
         if (!m.workspace.empty())
             for (auto& t : tokenize(m.workspace))
-                appToks.push_back(t);
+                contentToks.push_back(t);
 
-        double score        = 0.0;
-        int    distinctHits = 0;
+        double score         = 0.0;
+        int    distinctHits  = 0;
+        bool   exactDistinct = false;
         for (auto& pt : ptoks) {
-            bool nameHit = false, appHit = false;
-            for (auto& nt : nameToks)
-                if (tokMatch(pt, nt)) { nameHit = true; break; }
-            if (!nameHit)
-                for (auto& at : appToks)
-                    if (tokMatch(pt, at)) { appHit = true; break; }
-            if (nameHit) { score += 2.0; distinctHits++; }
-            else if (appHit) { score += 1.0; distinctHits++; }
+            double ts = 0.0;
+            for (auto& nt : nameToks) {
+                if (pt == nt) {
+                    ts = std::max(ts, 1.0);
+                    if (nameTokFreq[nt] == 1)
+                        exactDistinct = true;
+                } else if (tokMatch(pt, nt)) {
+                    ts = std::max(ts, 0.5);
+                }
+            }
+            for (auto& ct : contentToks)
+                if (tokMatch(pt, ct)) { ts = std::max(ts, 1.0); break; }
+            if (ts > 0.0) { score += ts; distinctHits++; }
         }
+        // Full name spoken: every name token has an exact phrase-token equal.
+        bool fullNameSpoken = !nameToks.empty();
+        for (auto& nt : nameToks) {
+            bool covered = false;
+            for (auto& pt : ptoks)
+                if (pt == nt) { covered = true; break; }
+            if (!covered) { fullNameSpoken = false; break; }
+        }
+        if (fullNameSpoken || exactDistinct)
+            score += 3.0; // literal name reference — decisive
+
         if (score > 0.0)
             scored.push_back({&m, score, distinctHits});
     }
@@ -268,7 +307,7 @@ SMonitorMatch SDesktopContext::resolveMonitor(const std::string& phrase) const {
         // Unique winner. Confidence scales with how much of the phrase it explained
         // and how far ahead of the runner-up it is.
         double margin = scored.size() > 1 ? (best - scored[1].score) : best;
-        double cover  = std::min(1.0, best / (2.0 * static_cast<double>(ptoks.size())));
+        double cover  = std::min(1.0, best / static_cast<double>(ptoks.size()));
         res.confidence = std::min(1.0, 0.6 + 0.2 * cover + 0.2 * std::min(1.0, margin / 2.0));
     }
     return res;
@@ -298,15 +337,47 @@ std::string SDesktopContext::digest(int maxMonitors, int maxAppsPerMon) const {
             o += " [focused]";
         if (!m.workspace.empty())
             o += " ws=" + m.workspace;
-        // apps: prefer class names (stable), fall back to titles.
-        std::vector<std::string> apps = m.appClasses;
-        if (apps.empty())
-            apps = m.appTitles;
-        if (!apps.empty()) {
+        // apps: the (stable) class names…
+        if (!m.appClasses.empty()) {
             o += " apps=";
-            for (int i = 0; i < static_cast<int>(apps.size()) && i < maxAppsPerMon; i++) {
+            for (int i = 0; i < static_cast<int>(m.appClasses.size()) && i < maxAppsPerMon; i++) {
                 if (i) o += ",";
-                o += apps[i];
+                o += m.appClasses[i];
+            }
+        }
+        // …PLUS salient window-title keywords — titles are where "YouTube", document
+        // names, and project dirs live, and the user references monitors by content,
+        // not by (often generic/auto-assigned) name. Titles are long and noisy, so we
+        // take only the LEADING tokens of each title (the salient name comes first:
+        // "YouTube - Mozilla Firefox", "main.cpp - NVIM"), dedup them, drop tokens
+        // already covered by a class name, and cap at maxAppsPerMon keywords.
+        {
+            std::set<std::string> classToks;
+            for (auto& c : m.appClasses)
+                for (auto& t : tokenize(c))
+                    classToks.insert(t);
+            std::vector<std::string> tkeys;
+            for (auto& title : m.appTitles) {
+                std::vector<std::string> toks = tokenize(title);
+                for (int i = 0; i < static_cast<int>(toks.size()) && i < 4; i++) {
+                    const std::string& tk = toks[i];
+                    if (tk.size() < 3 || isStop(tk) || classToks.count(tk))
+                        continue;
+                    if (std::find(tkeys.begin(), tkeys.end(), tk) != tkeys.end())
+                        continue;
+                    tkeys.push_back(tk);
+                    if (static_cast<int>(tkeys.size()) >= maxAppsPerMon)
+                        break;
+                }
+                if (static_cast<int>(tkeys.size()) >= maxAppsPerMon)
+                    break;
+            }
+            if (!tkeys.empty()) {
+                o += " titles=";
+                for (size_t i = 0; i < tkeys.size(); i++) {
+                    if (i) o += ",";
+                    o += tkeys[i];
+                }
             }
         }
         o += "\n";

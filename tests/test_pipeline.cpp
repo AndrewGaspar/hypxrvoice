@@ -174,6 +174,41 @@ TEST_CASE("pipeline: ambiguous reference marks low confidence, still no wrong ac
     CHECK((h.ranLine("hyprctl openxr select XR-a") || h.ranLine("hyprctl openxr select XR-b")));
 }
 
+TEST_CASE("pipeline: generic monitor names — only client context disambiguates") {
+    // Auto-assigned names carry no signal; classes/titles must resolve the target.
+    const char* mons = R"json([
+        {"id":3,"name":"XR-1"},{"id":4,"name":"XR-2"},{"id":5,"name":"XR-3"}
+    ])json";
+    const char* cls = R"json([
+        {"class":"mpv","title":"family-video.mp4 - mpv","monitor":3,"mapped":true},
+        {"class":"nvim","title":"main.cpp - ~/code/hypxrland - NVIM","monitor":4,"mapped":true},
+        {"class":"ghostty","title":"~/code/hypxrland","monitor":4,"mapped":true},
+        {"class":"chromium","title":"YouTube - Big Buck Bunny - Chromium","monitor":5,"mapped":true}
+    ])json";
+    const char* xr = R"json({"state":"focused","monitors":[
+        {"name":"XR-1","id":3,"anchor":{"mode":"local"}},
+        {"name":"XR-2","id":4,"anchor":{"mode":"local"}},
+        {"name":"XR-3","id":5,"anchor":{"mode":"local"}}
+    ]})json";
+
+    // "have youtube follow me": youtube exists ONLY in the chromium window title.
+    Harness h1;
+    auto r1 = IntentPipeline::process(mk("have youtube follow me"), h1.cfg,
+                                      mockHyprctl(mons, cls, xr), mockGaze(-1, ""), h1.runner);
+    CHECK(r1.action.verb == EVerb::Follow);
+    CHECK(r1.action.target == "XR-3");
+    CHECK(h1.ranLine("hyprctl openxr select XR-3"));
+    CHECK(h1.ranLine("hyprctl openxr adaptive on"));
+
+    // "move the coding monitor closer": resolved via the editor's title/project dir.
+    Harness h2;
+    auto r2 = IntentPipeline::process(mk("move the coding monitor closer"), h2.cfg,
+                                      mockHyprctl(mons, cls, xr), mockGaze(-1, ""), h2.runner);
+    CHECK(r2.action.verb == EVerb::MoveDist);
+    CHECK(r2.action.target == "XR-2");
+    CHECK(h2.ranLine("hyprctl openxr select XR-2"));
+}
+
 TEST_CASE("pipeline: dry-run builds the plan but actuates nothing") {
     Harness h(/*live=*/false); // dry_run = true
     auto r = IntentPipeline::process(mk("move the coding monitor closer"), h.cfg,
