@@ -1,0 +1,117 @@
+#include "Vad.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+CVad::CVad(const SVadConfig& cfg) : m_cfg(cfg) {
+    if (m_cfg.frameMs <= 0)
+        m_cfg.frameMs = 20;
+    if (m_cfg.sampleRate <= 0)
+        m_cfg.sampleRate = 16000;
+    m_frameSamples  = static_cast<size_t>(m_cfg.sampleRate) * m_cfg.frameMs / 1000;
+    if (m_frameSamples == 0)
+        m_frameSamples = 1;
+    m_preRollFrames = std::max(0, m_cfg.preRollMs) / std::max(1, m_cfg.frameMs);
+}
+
+static float rms(const float* x, size_t n) {
+    if (n == 0)
+        return 0.f;
+    double acc = 0;
+    for (size_t i = 0; i < n; i++)
+        acc += static_cast<double>(x[i]) * x[i];
+    return static_cast<float>(std::sqrt(acc / n));
+}
+
+int CVad::push(const float* samples, size_t n, int64_t frameStartMonoMs, std::vector<SSpeechSegment>& out) {
+    if (!m_haveBase) {
+        // Anchor the sample->time mapping to the first sample we ever see.
+        m_baseMonoMs = frameStartMonoMs;
+        m_haveBase   = true;
+    }
+    const size_t before = out.size();
+
+    // Accumulate into full frames, carrying any remainder across calls.
+    m_pending.insert(m_pending.end(), samples, samples + n);
+    size_t off = 0;
+    while (m_pending.size() - off >= m_frameSamples) {
+        int64_t frameStartMs = m_baseMonoMs + (m_sampleIdx * 1000) / m_cfg.sampleRate;
+        processFrame(m_pending.data() + off, frameStartMs, out);
+        off += m_frameSamples;
+        m_sampleIdx += static_cast<int64_t>(m_frameSamples);
+    }
+    if (off > 0)
+        m_pending.erase(m_pending.begin(), m_pending.begin() + off);
+
+    return static_cast<int>(out.size() - before);
+}
+
+void CVad::processFrame(const float* frame, int64_t frameStartMs, std::vector<SSpeechSegment>& out) {
+    const bool voiced = rms(frame, m_frameSamples) >= m_cfg.energyThreshold;
+
+    if (!m_inSpeech) {
+        // Maintain the pre-roll ring while idle.
+        m_preRoll.emplace_back(frame, frame + m_frameSamples);
+        while (m_preRoll.size() > m_preRollFrames)
+            m_preRoll.pop_front();
+
+        if (voiced) {
+            if (m_voicedRunMs == 0)
+                m_runStartMs = frameStartMs; // first voiced frame of this run
+            m_voicedRunMs += m_cfg.frameMs;
+            if (m_voicedRunMs >= m_cfg.startMs) {
+                // Onset. Seed the utterance with the pre-roll, then this frame.
+                m_inSpeech     = true;
+                m_onsetMs      = m_runStartMs;
+                m_silenceRunMs = 0;
+                // samples[0] is the oldest pre-roll frame, which starts one frame
+                // per queued pre-roll frame before the current frame.
+                m_bufferStartMs = frameStartMs - static_cast<int64_t>(m_preRoll.size()) * m_cfg.frameMs;
+                m_utterance.clear();
+                for (auto& pf : m_preRoll)
+                    m_utterance.insert(m_utterance.end(), pf.begin(), pf.end());
+                m_utterance.insert(m_utterance.end(), frame, frame + m_frameSamples);
+                m_preRoll.clear();
+            }
+        } else {
+            m_voicedRunMs = 0;
+        }
+        return;
+    }
+
+    // In speech: keep appending; track trailing silence for endpointing.
+    m_utterance.insert(m_utterance.end(), frame, frame + m_frameSamples);
+    if (voiced) {
+        m_silenceRunMs = 0;
+    } else {
+        m_silenceRunMs += m_cfg.frameMs;
+    }
+
+    const int64_t frameEndMs      = frameStartMs + m_cfg.frameMs;
+    const int64_t utteranceLenMs  = frameEndMs - m_onsetMs;
+    if (m_silenceRunMs >= m_cfg.endMs || utteranceLenMs >= m_cfg.maxUtteranceMs)
+        emit(frameEndMs, out);
+}
+
+void CVad::emit(int64_t endMs, std::vector<SSpeechSegment>& out) {
+    SSpeechSegment seg;
+    seg.onsetMs       = m_onsetMs;
+    seg.endMs         = endMs;
+    seg.bufferStartMs = m_bufferStartMs;
+    seg.samples       = std::move(m_utterance);
+    out.push_back(std::move(seg));
+
+    m_inSpeech     = false;
+    m_voicedRunMs  = 0;
+    m_silenceRunMs = 0;
+    m_utterance.clear();
+    m_preRoll.clear();
+}
+
+bool CVad::flush(std::vector<SSpeechSegment>& out) {
+    if (!m_inSpeech)
+        return false;
+    int64_t endMs = m_baseMonoMs + (m_sampleIdx * 1000) / m_cfg.sampleRate;
+    emit(endMs, out);
+    return true;
+}
