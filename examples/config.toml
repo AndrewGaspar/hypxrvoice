@@ -49,7 +49,33 @@ translate = false
 
 [feedback]
 stdout_json = true      # print each transcript as a JSON line on stdout
-notify = true           # notify-send toast per transcript
+notify = true           # notify-send toast (fallback when the HUD isn't showing it)
+
+# ---- WP-V5: in-headset HUD (head-locked OpenXR overlay quad) ----
+# Rendered by a separate `hypxrvoice-hud` subprocess the daemon spawns on demand. It
+# shows the live transcript while listening and the parsed action (target, verb,
+# confidence, clarify candidates) as your VETO window before/as it executes. Degrades
+# cleanly to notify-send when there is no XR runtime / headset. Requires the daemon to
+# have been built with OpenXR (openxr/egl/gbm present at build time).
+hud = true
+hud_pose = "0,-0.25,-1.0"   # VIEW-space centre (x right, y up, z fwd-negative), metres
+hud_size = 0.42             # quad width in metres (height follows the texture aspect)
+hud_opacity = 0.92          # peak layer opacity (0..1)
+hud_hold_ms = 2600          # how long the action panel holds before it fades
+hud_fade_ms = 450           # fade-out duration
+# Overlay stacking order (sessionLayersPlacement). MUST differ from HypXRland's
+# openxr:overlay_z; higher = on top. Default 20 sits above the monitors.
+hud_z = 20
+# DRM render node — MUST match the XR runtime's GPU on a multi-GPU box (e.g. the
+# NVIDIA node when WiVRn runs there). Empty = auto-scan the first working node.
+hud_gpu = ""
+
+# ---- WP-V5: terse TTS (spoken confirmations) ----
+# Confirms what you can't see on the HUD. "off" | "errors" (refusals + clarify) |
+# "all" (also success). Needs the `espeak-ng` binary on PATH, else cleanly disabled.
+tts = "errors"
+tts_voice = ""              # espeak-ng voice name, empty = its default (e.g. "en-us")
+tts_rate = 175             # words per minute
 
 [compositor]
 enabled = true          # poll `hyprctl openxr status -j`

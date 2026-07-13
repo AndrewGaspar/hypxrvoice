@@ -58,6 +58,27 @@ struct SConfig {
     struct {
         bool stdoutJson = true;
         bool notify     = true; // notify-send toasts
+
+        // WP-V5 in-headset HUD (a head-locked OpenXR overlay quad). Rendered by a
+        // separate `hypxrvoice-hud` subprocess the daemon spawns; degrades to
+        // notify-send when no XR runtime / binary is available. DEFAULT OFF so unit
+        // tests and offline tools never spawn an XR client (safety: one runtime per
+        // box). examples/config.toml turns it on.
+        bool        hud        = false;
+        std::string hudPose    = "0,-0.25,-1.0"; // VIEW-space centre, metres (x,y,z).
+        float       hudSize    = 0.42f;          // quad width in metres (height from aspect).
+        float       hudOpacity = 0.92f;          // peak layer opacity (color-scale-bias .a).
+        int         hudHoldMs  = 2600;           // action panel dwell before it fades.
+        int         hudFadeMs  = 450;            // fade-out duration.
+        int         hudZ       = 20;             // overlay sessionLayersPlacement (above HypXRland's).
+        std::string hudGpu;                      // DRM render node; empty = auto (must match runtime).
+
+        // WP-V5 terse TTS. Spoken confirmations for things you can't see on the HUD
+        // (errors, clarify). "off" | "errors" (errors+clarify) | "all". espeak-ng
+        // binary on PATH; cleanly disabled if absent.
+        std::string ttsMode  = "errors";
+        std::string ttsVoice;             // espeak-ng voice, empty = its default.
+        int         ttsRate  = 175;       // words per minute.
     } feedback;
 
     struct {

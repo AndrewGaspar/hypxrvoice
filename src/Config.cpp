@@ -195,6 +195,31 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.feedback.stdoutJson, val);
         } else if (k == "feedback.notify") {
             setBool(out.feedback.notify, val);
+        } else if (k == "feedback.hud") {
+            setBool(out.feedback.hud, val);
+        } else if (k == "feedback.hud_pose") {
+            setStr(out.feedback.hudPose, val);
+        } else if (k == "feedback.hud_size") {
+            setFloat(out.feedback.hudSize, val);
+        } else if (k == "feedback.hud_opacity") {
+            setFloat(out.feedback.hudOpacity, val);
+        } else if (k == "feedback.hud_hold_ms") {
+            setInt(out.feedback.hudHoldMs, val);
+        } else if (k == "feedback.hud_fade_ms") {
+            setInt(out.feedback.hudFadeMs, val);
+        } else if (k == "feedback.hud_z") {
+            setInt(out.feedback.hudZ, val);
+        } else if (k == "feedback.hud_gpu") {
+            setStr(out.feedback.hudGpu, val);
+        } else if (k == "feedback.tts") {
+            std::string v;
+            if (!setStr(v, val)) continue;
+            if (v == "off" || v == "errors" || v == "all") out.feedback.ttsMode = v;
+            else err("feedback.tts must be off|errors|all");
+        } else if (k == "feedback.tts_voice") {
+            setStr(out.feedback.ttsVoice, val);
+        } else if (k == "feedback.tts_rate") {
+            setInt(out.feedback.ttsRate, val);
         } else if (k == "compositor.enabled") {
             setBool(out.compositor.enabled, val);
         } else if (k == "compositor.poll_ms") {

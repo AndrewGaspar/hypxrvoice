@@ -47,9 +47,54 @@ else()
     message(STATUS "hypxrvoice: local-LLM intent backend disabled (rule backend only)")
 endif()
 
+# ---- WP-V5: optional OpenXR HUD overlay subprocess deps ----
+# The in-headset HUD is rendered by a separate `hypxrvoice-hud` process (like the
+# hypxrpaper sibling): single-threaded OpenXR + EGL/GBM. When these libs are absent the
+# subprocess is simply not built and the daemon degrades to notify-send at runtime.
+set(HAVE_XR FALSE)
+pkg_check_modules(xrdeps IMPORTED_TARGET openxr egl glesv2 gbm libdrm)
+if(xrdeps_FOUND)
+    set(HAVE_XR TRUE)
+    message(STATUS "hypxrvoice: in-headset HUD overlay ENABLED (openxr/egl/gbm found)")
+else()
+    message(STATUS "hypxrvoice: HUD overlay subprocess disabled (openxr/egl/gbm not found) — notify-send fallback")
+endif()
+
+# ---- bundled OFL font, baked into the binary (font_data.c) ----
+set(HUD_FONT_TTF ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/LiberationMono-Regular.ttf)
+set(HUD_FONT_C   ${CMAKE_CURRENT_BINARY_DIR}/font_data.c)
+add_custom_command(
+    OUTPUT ${HUD_FONT_C}
+    COMMAND ${CMAKE_COMMAND} -DFONT_IN=${HUD_FONT_TTF} -DOUT_C=${HUD_FONT_C}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+    DEPENDS ${HUD_FONT_TTF} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
+    COMMENT "Embedding HUD font (LiberationMono, OFL)"
+    VERBATIM)
+
+# ---- hud_core: the light, pure feedback library (NO whisper/pipewire/XR) ----
+# Shared by the daemon (via hypxrvoice_core) AND the hypxrvoice-hud subprocess, so the
+# HUD renderer never pulls in the heavy ASR/audio stack. Depends only on jansson (wire
+# format) + the vendored stb headers + the bundled font.
+add_library(hypxrvoice_hud_core STATIC
+    src/Log.cpp
+    src/HudModel.cpp
+    src/HudText.cpp
+    src/HudMessage.cpp
+    src/PngWrite.cpp
+    src/Tts.cpp
+    src/stb_impl.cpp
+    ${HUD_FONT_C}
+)
+target_include_directories(hypxrvoice_hud_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_link_libraries(hypxrvoice_hud_core PUBLIC PkgConfig::jansson)
+target_compile_options(hypxrvoice_hud_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+# The stb single-header impls have their own upstream warning style.
+set_source_files_properties(src/stb_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
+
 # ---- core library (shared by the daemon and the tests) ----
 add_library(hypxrvoice_core STATIC
-    src/Log.cpp
     src/Config.cpp
     src/Transcript.cpp
     src/ActivationMachine.cpp
@@ -61,6 +106,7 @@ add_library(hypxrvoice_core STATIC
     src/AudioCapture.cpp
     src/ControlSocket.cpp
     src/Feedback.cpp
+    src/HudOverlay.cpp
     src/Pipeline.cpp
     src/Command.cpp
     src/DesktopContext.cpp
@@ -74,6 +120,7 @@ add_library(hypxrvoice_core STATIC
 )
 target_include_directories(hypxrvoice_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(hypxrvoice_core PUBLIC
+    hypxrvoice_hud_core
     whisper
     PkgConfig::pipewire
     PkgConfig::spa
@@ -104,6 +151,18 @@ target_compile_options(hypxrvoicectl PRIVATE -Wall -Wextra)
 
 install(TARGETS hypxrvoiced hypxrvoicectl RUNTIME DESTINATION bin)
 
+# ---- WP-V5: hypxrvoice-hud overlay subprocess (only when XR deps are present) ----
+if(HAVE_XR)
+    add_executable(hypxrvoice-hud
+        src/hud/hud_main.cpp
+        src/hud/HudSession.cpp
+        src/hud/Egl.cpp
+    )
+    target_link_libraries(hypxrvoice-hud PRIVATE hypxrvoice_hud_core PkgConfig::xrdeps)
+    target_compile_options(hypxrvoice-hud PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+    install(TARGETS hypxrvoice-hud RUNTIME DESTINATION bin)
+endif()
+
 # ---- tests ----
 enable_testing()
 add_executable(hypxrvoice_tests
@@ -121,6 +180,8 @@ add_executable(hypxrvoice_tests
     tests/test_intent.cpp
     tests/test_pipeline.cpp
     tests/test_llama.cpp
+    tests/test_hud.cpp
+    tests/test_tts.cpp
 )
 target_include_directories(hypxrvoice_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_link_libraries(hypxrvoice_tests PRIVATE hypxrvoice_core)

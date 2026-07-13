@@ -17,6 +17,7 @@
 
 CDaemon::~CDaemon() {
     m_audio.stop();
+    Feedback::stopRuntime();
     m_control.stop();
     if (m_eventFd >= 0) close(m_eventFd);
     if (m_timerFd >= 0) close(m_timerFd);
@@ -55,6 +56,10 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
         Log::log(Log::ERR, "ASR unavailable: {}", asrErr);
 
     loadIntentBackend();
+
+    // WP-V5 feedback runtime: in-headset HUD (spawns the hypxrvoice-hud overlay
+    // subprocess lazily) + terse TTS. Daemon-only — degrades to notify-send.
+    Feedback::startRuntime(m_cfg);
 
     m_eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     m_timerFd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -185,8 +190,10 @@ void CDaemon::applyMicPolicy() {
         m_listenSinceMs = Clock::monotonicMs();
         m_audio.start(chooseSource(), m_cfg.audio.sampleRate,
                       [this](const float* f, size_t n, int64_t ms) { onAudio(f, n, ms); });
+        Feedback::onListeningStart(m_cfg); // show the HUD listening panel.
     } else if (!want && m_audio.running()) {
         m_audio.stop();
+        Feedback::onListeningStop(m_cfg); // hide it if no command landed.
     }
 }
 
@@ -210,6 +217,7 @@ void CDaemon::tick() {
         }
     }
     applyMicPolicy();
+    Feedback::pollRuntime(); // reap the HUD subprocess if it exited; degrade once.
 
     if (m_machine.state() != m_lastState) {
         Log::log(Log::DEBUG, "state {} -> {}", stateName(m_lastState), stateName(m_machine.state()));
@@ -302,6 +310,9 @@ std::string CDaemon::doReload() {
     if (m_cfg.intent.backend != oldBackend || m_cfg.intent.model != oldIntentModel ||
         m_cfg.intent.enabled != oldIntentEnabled)
         loadIntentBackend();
+    // Re-apply feedback config (TTS mode, HUD enable). Geometry/pose changes take
+    // effect when the overlay subprocess is next (re)spawned — see README.
+    Feedback::startRuntime(m_cfg);
     applyMicPolicy();
     return note;
 }

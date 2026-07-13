@@ -1,5 +1,8 @@
 #include "Feedback.hpp"
+#include "HudModel.hpp"
+#include "HudOverlay.hpp"
 #include "Log.hpp"
+#include "Tts.hpp"
 
 #include <cstdio>
 #include <spawn.h>
@@ -18,13 +21,54 @@ namespace {
                                           const_cast<char* const*>(argv), environ);
         if (rc != 0)
             return; // notify-send absent — silently skip
-        // Reap without blocking the loop meaningfully.
         int status = 0;
         waitpid(pid, &status, 0);
     }
+
+    // Daemon-only feedback runtime. Constructed lazily by startRuntime(); the emit
+    // functions consult g_rt.active so oneshot/tests (which never start it) keep the
+    // pure stdout/log/notify behaviour and never touch the HUD subprocess or XR.
+    struct SRuntime {
+        bool        active = false;
+        CHudOverlay hud;
+    };
+    SRuntime g_rt;
 }
 
 namespace Feedback {
+    void startRuntime(const SConfig& cfg) {
+        g_rt.active = true;
+        g_rt.hud.configure(cfg);
+        if (cfg.feedback.ttsMode != "off")
+            Log::log(Log::INFO, "TTS mode '{}' ({})", cfg.feedback.ttsMode,
+                     Tts::available() ? "espeak-ng found" : "espeak-ng NOT on PATH — TTS disabled");
+        if (cfg.feedback.hud)
+            Log::log(Log::INFO, "HUD overlay enabled (spawns on first feedback)");
+    }
+
+    void stopRuntime() {
+        g_rt.hud.stop();
+        g_rt.active = false;
+    }
+
+    void pollRuntime() {
+        if (g_rt.active)
+            g_rt.hud.poll();
+    }
+
+    void onListeningStart(const SConfig& cfg) {
+        if (g_rt.active && cfg.feedback.hud)
+            g_rt.hud.send(hudForListening("", cfg));
+    }
+
+    void onListeningStop(const SConfig& cfg) {
+        if (g_rt.active && cfg.feedback.hud) {
+            SHudView hide;
+            hide.state = EHudState::Hidden;
+            g_rt.hud.send(hide);
+        }
+    }
+
     void emitTranscript(const STranscript& t, const SConfig& cfg) {
         if (cfg.feedback.stdoutJson) {
             std::fprintf(stdout, "%s\n", t.toJson().c_str());
@@ -32,7 +76,15 @@ namespace Feedback {
         }
         Log::log(Log::INFO, "transcript [{}] onset={}ms words={}: \"{}\"",
                  activationName(t.activation), t.onsetMs, t.words.size(), t.text);
-        if (cfg.feedback.notify && !t.text.empty())
+
+        // While listening, echo the partial transcript on the HUD (the veto preview).
+        if (g_rt.active && cfg.feedback.hud && !t.text.empty())
+            g_rt.hud.send(hudForListening(t.text, cfg));
+
+        // notify-send is the HUD-less fallback: only toast the transcript when the HUD
+        // is not carrying it (keeps a headset user's desktop quiet).
+        const bool hudCarrying = g_rt.active && cfg.feedback.hud && g_rt.hud.enabled();
+        if (cfg.feedback.notify && !hudCarrying && !t.text.empty())
             notify("hypxrvoice", t.text);
     }
 
@@ -48,13 +100,34 @@ namespace Feedback {
                  targetSourceName(a.targetSource), a.confidence, plan.steps.size(),
                  plan.approximated ? "(approx)" : "");
 
-        // A human-facing toast: the phrasing + a low-confidence / clarify hint.
-        if (cfg.feedback.notify) {
+        // Nothing recognised as a command: keep quiet (and clear a listening HUD).
+        if (a.verb == EVerb::None) {
+            if (g_rt.active && cfg.feedback.hud)
+                onListeningStop(cfg);
+            return;
+        }
+
+        // In-headset HUD: the primary channel. Build the view and send it.
+        bool hudShown = false;
+        if (g_rt.active && cfg.feedback.hud) {
+            SHudView v = hudForAction(a, plan, cfg);
+            hudShown   = g_rt.hud.send(v);
+        }
+
+        // Terse TTS: confirms what the HUD can't (errors, clarify; success only in
+        // "all" mode). Independent of the HUD channel.
+        if (g_rt.active) {
+            std::string phrase = Tts::phraseFor(a, plan, cfg);
+            if (!phrase.empty())
+                Tts::speak(phrase, cfg);
+        }
+
+        // notify-send fallback: only when the HUD didn't carry it (out of headset, no
+        // XR runtime, or HUD disabled) — preserves the V4 toast behaviour there.
+        if (cfg.feedback.notify && !hudShown) {
             std::string body;
             if (a.verb == EVerb::Clarify)
                 body = a.clarifyQuestion.empty() ? "please clarify" : a.clarifyQuestion;
-            else if (a.verb == EVerb::None)
-                body = ""; // nothing spoken that was a command — stay silent
             else {
                 body = std::string(verbName(a.verb));
                 if (!a.target.empty() && a.target != "active")
