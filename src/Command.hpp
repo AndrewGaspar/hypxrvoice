@@ -30,6 +30,7 @@ enum class EVerb {
 };
 
 const char* verbName(EVerb v);
+EVerb       verbFromName(const std::string& s); // unknown -> EVerb::None.
 
 // Anchor / follow reference frame. Mirrors the compositor's anchor grammar.
 enum class EAnchorMode { Unset, Local, Head, Body, DeviceLeft, DeviceRight };

@@ -23,7 +23,7 @@ const char* verbName(EVerb v) {
     return "?";
 }
 
-static EVerb verbFromName(const std::string& s) {
+EVerb verbFromName(const std::string& s) {
     if (s == "none")       return EVerb::None;
     if (s == "clarify")    return EVerb::Clarify;
     if (s == "pick")       return EVerb::Pick;

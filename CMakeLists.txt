@@ -28,6 +28,25 @@ if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/subprojects/whisper.cpp/CMakeLists.txt
 endif()
 add_subdirectory(subprojects/whisper.cpp EXCLUDE_FROM_ALL)
 
+# ---- vendored llama.cpp (subprojects/, pinned shallow submodule) — OPTIONAL ----
+# Provides the local-LLM (GBNF-constrained) intent backend. When absent or disabled,
+# the daemon falls back to the deterministic rule backend (HAVE_LLAMA undefined).
+option(HYPXRVOICE_LLAMA "Build the local-LLM intent backend (subprojects/llama.cpp)" ON)
+set(HAVE_LLAMA FALSE)
+if(HYPXRVOICE_LLAMA AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/subprojects/llama.cpp/CMakeLists.txt)
+    set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_COMMON   ON  CACHE BOOL "" FORCE) # we link llama-common
+    set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
+    add_subdirectory(subprojects/llama.cpp EXCLUDE_FROM_ALL)
+    set(HAVE_LLAMA TRUE)
+    message(STATUS "hypxrvoice: local-LLM intent backend ENABLED (llama.cpp)")
+else()
+    message(STATUS "hypxrvoice: local-LLM intent backend disabled (rule backend only)")
+endif()
+
 # ---- core library (shared by the daemon and the tests) ----
 add_library(hypxrvoice_core STATIC
     src/Log.cpp
@@ -46,7 +65,9 @@ add_library(hypxrvoice_core STATIC
     src/Command.cpp
     src/DesktopContext.cpp
     src/GazeResolver.cpp
+    src/Grammar.cpp
     src/Intent.cpp
+    src/LlamaIntent.cpp
     src/Executor.cpp
     src/IntentPipeline.cpp
     src/Daemon.cpp
@@ -60,6 +81,16 @@ target_link_libraries(hypxrvoice_core PUBLIC
     PkgConfig::jansson
 )
 target_compile_options(hypxrvoice_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+
+if(HAVE_LLAMA)
+    target_compile_definitions(hypxrvoice_core PUBLIC HAVE_LLAMA)
+    # llama.cpp's "common" helper lib is target `llama-common` in this pin.
+    target_link_libraries(hypxrvoice_core PUBLIC llama llama-common)
+    target_include_directories(hypxrvoice_core PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/subprojects/llama.cpp/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/subprojects/llama.cpp/common
+        ${CMAKE_CURRENT_SOURCE_DIR}/subprojects/llama.cpp/ggml/include)
+endif()
 
 # ---- daemon ----
 add_executable(hypxrvoiced src/main.cpp)
@@ -89,6 +120,7 @@ add_executable(hypxrvoice_tests
     tests/test_executor.cpp
     tests/test_intent.cpp
     tests/test_pipeline.cpp
+    tests/test_llama.cpp
 )
 target_include_directories(hypxrvoice_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_link_libraries(hypxrvoice_tests PRIVATE hypxrvoice_core)

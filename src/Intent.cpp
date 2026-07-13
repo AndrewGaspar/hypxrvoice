@@ -46,39 +46,45 @@ namespace {
     }
 }
 
+SDeicticHit findDeictic(const STranscript& t) {
+    SDeicticHit hit;
+    int  bestIdx   = -1;
+    bool bestPlace = false;
+    for (size_t i = 0; i < t.words.size(); i++) {
+        std::string ww;
+        for (char c : t.words[i].text)
+            if (std::isalnum(static_cast<unsigned char>(c)))
+                ww += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ww == "this" || ww == "that") { bestIdx = static_cast<int>(i); bestPlace = false; }
+        else if (ww == "here" || ww == "there") { bestIdx = static_cast<int>(i); bestPlace = true; }
+    }
+    if (bestIdx >= 0) {
+        hit.found   = true;
+        hit.isPlace = bestPlace;
+        hit.ms      = t.words[bestIdx].startMs;
+        return hit;
+    }
+    // No per-word timestamps (heuristic ASR): fall back to the whole-utterance bounds.
+    const std::string text = lower(t.text);
+    if (contains(text, "here") || contains(text, "there")) {
+        hit.found = true; hit.isPlace = true; hit.ms = t.endMs;
+    } else if (contains(text, "this") || contains(text, "that")) {
+        hit.found = true; hit.isPlace = false; hit.ms = t.onsetMs;
+    }
+    return hit;
+}
+
 SRawIntent CRuleIntent::detect(const STranscript& t) const {
     SRawIntent r;
     const std::string text = lower(t.text);
     if (text.empty())
         return r; // None
 
-    // ---- deixis: find the (trailing) deictic word and its timestamp ----
-    // "this"/"that" select a monitor; "here"/"there" select a world pose.
-    {
-        int  bestIdx  = -1;
-        bool bestPlace = false;
-        for (size_t i = 0; i < t.words.size(); i++) {
-            std::string w = lower(t.words[i].text);
-            // strip trailing punctuation already handled by tokenizer upstream; the
-            // transcript words may still carry casing/punct, so normalize edges.
-            std::string ww;
-            for (char c : w)
-                if (std::isalnum(static_cast<unsigned char>(c)))
-                    ww += c;
-            if (ww == "this" || ww == "that") { bestIdx = static_cast<int>(i); bestPlace = false; }
-            else if (ww == "here" || ww == "there") { bestIdx = static_cast<int>(i); bestPlace = true; }
-        }
-        if (bestIdx >= 0) {
-            r.deictic        = true;
-            r.deicticIsPlace = bestPlace;
-            r.deicticWordMs  = t.words[bestIdx].startMs;
-        } else if (contains(text, " here") || contains(text, " this")) {
-            // Deictic present but no per-word timestamps (heuristic ASR): anchor to the
-            // trailing instant for "here", the onset for "this".
-            r.deictic        = true;
-            r.deicticIsPlace = contains(text, "here") || contains(text, "there");
-            r.deicticWordMs  = r.deicticIsPlace ? t.endMs : t.onsetMs;
-        }
+    // ---- deixis: the (trailing) deictic word governs targeting/placement ----
+    if (SDeicticHit d = findDeictic(t); d.found) {
+        r.deictic        = true;
+        r.deicticIsPlace = d.isPlace;
+        r.deicticWordMs  = d.ms;
     }
 
     // ---- verb detection (order matters: specific before generic) ----

@@ -54,3 +54,39 @@ notify = true           # notify-send toast per transcript
 [compositor]
 enabled = true          # poll `hyprctl openxr status -j`
 poll_ms = 1000
+
+# ---- WP-V4: intent tier (transcript -> typed command) ----
+[intent]
+enabled = true
+# backend = "rule"  : deterministic keyword grammar (fast, offline, no model). Default.
+# backend = "llama" : local GGUF, GBNF-constrained to the command schema. Needs `model`.
+backend = "rule"
+model = ""              # e.g. "~/.local/share/hypxrvoice/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+temperature = 0.0       # 0 = greedy/deterministic (recommended for command parsing)
+threads = 4
+context_max_monitors = 16   # digest caps (bound the prompt size)
+context_max_apps = 6
+# Deixis ("this"/"here") resolution against the gaze ring. Gaze leads speech, and ASR
+# word timestamps are noisy, so we query a lead-shifted stability window at word time.
+deixis_window_ms = 300      # span sampled ending at the lead-shifted target
+deixis_lead_ms = 200        # shift the query earlier (gaze precedes the spoken word)
+deixis_samples = 5          # ring points sampled across the window (modal pick)
+distance_step_m = 0.25      # "closer"/"further" step
+
+# ---- WP-V4: executor (typed command -> allowlisted hyprctl argv) ----
+[executor]
+# DEFAULT TRUE: log the exact hyprctl argv and actuate NOTHING. Flip to false only
+# once you trust the pipeline on your setup.
+dry_run = true
+allow_xrmonitor = true  # permit openxr/xrmonitor actuation (when dry_run=false)
+allow_launch = false    # permit app launch — only from the [apps] allowlist below
+# Optional compositor verbs (see docs/COMPOSITOR-GAPS.md). Leave false unless your
+# HypXRland advertises them; the executor uses documented approximations otherwise.
+targeted_grab = false   # `openxr gazegrab <name>` — grab a NAMED monitor
+place_at_pose = false   # `openxr place <name> at x,y,z` — drop at the resolved gaze point
+
+# ---- app-launch allowlist: spoken alias -> a TRUSTED launch command ----
+# Never derived from transcript text. Use the uwsm/systemd-run pattern.
+[apps]
+# browser = "uwsm app -- firefox.desktop"
+# terminal = "uwsm app -- Alacritty.desktop"

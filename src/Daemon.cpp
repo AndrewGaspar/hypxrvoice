@@ -54,6 +54,8 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
     if (!m_asr.load(ap, asrErr))
         Log::log(Log::ERR, "ASR unavailable: {}", asrErr);
 
+    loadIntentBackend();
+
     m_eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     m_timerFd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     m_epollFd = epoll_create1(EPOLL_CLOEXEC);
@@ -87,6 +89,25 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
     Log::log(Log::INFO, "hypxrvoiced ready — state {}, mode {}", stateName(m_machine.state()),
              m_cfg.activation.mode == EActivationMode::Auto ? "auto" : (m_cfg.activation.mode == EActivationMode::Ptt ? "ptt" : "wake"));
     return true;
+}
+
+void CDaemon::loadIntentBackend() {
+    m_llama.reset();
+    if (!m_cfg.intent.enabled || m_cfg.intent.backend != "llama")
+        return;
+    if (m_cfg.intent.model.empty()) {
+        Log::log(Log::WARN, "intent.backend=llama but intent.model is empty — using rule backend");
+        return;
+    }
+    auto        llama = std::make_unique<CLlamaIntent>();
+    SLlamaParams lp{m_cfg.intent.model, m_cfg.intent.temperature, m_cfg.intent.nThreads,
+                    m_cfg.intent.contextMaxMonitors > 0 ? 4096 : 4096, 256};
+    std::string err;
+    if (llama->load(lp, err)) {
+        m_llama = std::move(llama);
+    } else {
+        Log::log(Log::ERR, "llama intent backend unavailable: {} — using rule backend", err);
+    }
 }
 
 void CDaemon::onAudio(const float* frames, size_t n, int64_t monoMs) {
@@ -136,8 +157,14 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
     // the live compositor for the read-only snapshot + gaze ring, and the executor's
     // (default dry-run) actuator. All injected here so the pipeline stays testable.
     if (m_cfg.intent.enabled) {
+        IntentFn backend;
+        if (m_llama && m_llama->loaded()) {
+            SIntentConfig ic = IntentPipeline::intentConfig(m_cfg);
+            backend = [this, ic](const STranscript& tt, const SDesktopContext& c,
+                                 const GazeQueryFn& g) { return m_llama->resolve(tt, c, g, ic); };
+        }
         auto r = IntentPipeline::process(t, m_cfg, defaultHyprctlQuery, defaultGazeQuery,
-                                         defaultRunner);
+                                         defaultRunner, backend);
         m_lastAction = std::string(verbName(r.action.verb)) +
                        (r.action.target.empty() ? "" : " " + r.action.target);
     }
@@ -255,6 +282,9 @@ std::string CDaemon::doReload() {
     const std::string oldModel    = m_cfg.asr.model;
     const std::string oldLang     = m_cfg.asr.language;
     const bool        oldTranslate = m_cfg.asr.translate;
+    const std::string oldBackend  = m_cfg.intent.backend;
+    const std::string oldIntentModel = m_cfg.intent.model;
+    const bool        oldIntentEnabled = m_cfg.intent.enabled;
     m_cfg                         = fresh;
     for (auto& w : warnings)
         Log::log(Log::WARN, "config: {}", w);
@@ -269,6 +299,9 @@ std::string CDaemon::doReload() {
         if (!m_asr.load(ap, asrErr)) // reload-safe; frees old ctx, keeps running on failure
             note = "ok: reloaded (ASR model load failed: " + asrErr + ")";
     }
+    if (m_cfg.intent.backend != oldBackend || m_cfg.intent.model != oldIntentModel ||
+        m_cfg.intent.enabled != oldIntentEnabled)
+        loadIntentBackend();
     applyMicPolicy();
     return note;
 }

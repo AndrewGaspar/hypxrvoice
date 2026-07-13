@@ -40,6 +40,17 @@ struct SRawIntent {
     std::string note;
 };
 
+// A located deictic word: which instant to query the gaze ring at, and whether it is
+// a place-deixis ("here"/"there") vs a monitor-deixis ("this"/"that").
+struct SDeicticHit {
+    bool    found   = false;
+    int64_t ms      = 0;
+    bool    isPlace = false;
+};
+// Find the TRAILING deictic word and its timestamp (falls back to onset/end when the
+// ASR gave no per-word timestamps). Shared by both intent backends.
+SDeicticHit findDeictic(const STranscript& t);
+
 // SHARED resolution: deixis (via `gazeQuery`) + semantic target (via `ctx`) + target
 // validation. `gazeQuery` may be a no-op (returns "") when no compositor is present;
 // deixis then degrades to the hovered-monitor hint or `active`.

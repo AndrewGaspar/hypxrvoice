@@ -6,6 +6,7 @@
 #include "Compositor.hpp"
 #include "Config.hpp"
 #include "ControlSocket.hpp"
+#include "LlamaIntent.hpp"
 #include "Vad.hpp"
 
 #include <atomic>
@@ -51,6 +52,7 @@ class CDaemon {
     std::string doReload();
 
     void resetVad();
+    void loadIntentBackend(); // (re)load the llama backend per config; rule fallback.
 
     SConfig            m_cfg;
     std::string        m_configPath;
@@ -60,7 +62,8 @@ class CDaemon {
     CCompositor        m_compositor;
     CControlServer     m_control;
 
-    std::unique_ptr<CVad> m_vad;
+    std::unique_ptr<CVad>         m_vad;
+    std::unique_ptr<CLlamaIntent> m_llama; // non-null only when the llama backend is loaded.
 
     std::mutex         m_qMu;
     std::deque<SChunk> m_queue;
