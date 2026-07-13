@@ -1,0 +1,31 @@
+# hypxrvoiced — voice-control daemon for HypXRland (systemd user service).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd/hypxrvoice.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hypxrvoice.service
+#
+# Hard-kill the mic at any time with:
+#   systemctl --user stop hypxrvoice.service
+#
+# The unit inherits HYPRLAND_INSTANCE_SIGNATURE from the graphical session, which the
+# daemon needs to reach `hyprctl`. If your session does not import it into the systemd
+# user environment, add to your Hyprland config:
+#   exec-once = systemctl --user import-environment HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY XDG_RUNTIME_DIR
+
+[Unit]
+Description=hypxrvoice — local-first voice control for HypXRland
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hypxrvoiced
+Restart=on-failure
+RestartSec=2
+# The daemon keeps no persistent audio/transcripts; a private /tmp is belt-and-braces.
+PrivateTmp=true
+
+[Install]
+WantedBy=graphical-session.target

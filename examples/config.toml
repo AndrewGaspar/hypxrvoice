@@ -1,0 +1,56 @@
+# hypxrvoice — example configuration.
+# Copy to $XDG_CONFIG_HOME/hypxrvoice/config.toml (usually ~/.config/hypxrvoice/config.toml).
+# Reload a running daemon after editing with:  hypxrvoicectl reload
+
+[activation]
+# auto = follow the compositor (at keyboard -> PTT only; away / headset donned -> wake armed)
+# ptt  = push-to-talk only, never auto-arm the wake word (maximally private)
+# wake = always wake-word armed, ignore the compositor
+mode = "auto"
+
+# When the compositor / openxr status is unavailable: "wake" (arm) or "gate" (PTT only).
+fallback = "wake"
+
+# Reserved for a future local at-keyboard heuristic (ms). The compositor signal is
+# primary today.
+keyboard_idle_ms = 3000
+
+[audio]
+# PipeWire source node name. Empty = the default source. At the desk this is your
+# desk mic; in the headset the daemon prefers `headset_source` below when the
+# compositor reports the headset is present.
+source = ""
+headset_source = "wivrn.source"
+sample_rate = 16000
+
+[vad]
+# Energy-gated voice activity detection. Raise energy_threshold if background noise
+# false-triggers; lower it if quiet speech is missed.
+energy_threshold = 0.012
+start_ms = 150          # sustained voiced audio before declaring speech onset
+end_ms = 600            # trailing silence (hangover) before ending an utterance
+max_utterance_ms = 12000
+pre_roll_ms = 300       # audio kept before the onset instant (avoids clipped words)
+
+[wake]
+enabled = true
+# vad-transcribe: transcribe armed speech and match the phrase in the transcript
+#                 (fully local, no extra models). openwakeword: reserved (WP-V7).
+backend = "vad-transcribe"
+phrase = "hey hypr"
+fuzz = 2                # per-word edit-distance tolerance for the phrase match
+
+[asr]
+# REQUIRED to transcribe. Fetch with scripts/fetch-models.sh, then set the path:
+model = ""              # e.g. "~/.local/share/hypxrvoice/models/ggml-base.en.bin"
+language = "en"
+threads = 4
+translate = false
+
+[feedback]
+stdout_json = true      # print each transcript as a JSON line on stdout
+notify = true           # notify-send toast per transcript
+
+[compositor]
+enabled = true          # poll `hyprctl openxr status -j`
+poll_ms = 1000

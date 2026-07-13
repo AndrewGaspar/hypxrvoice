@@ -1,0 +1,16 @@
+# Build directories
+/build/
+/build-*/
+/out/
+
+# Downloaded models (fetched by scripts/fetch-models.sh; large binaries)
+/models/*.bin
+/models/*.gguf
+
+# Editor / tooling
+/.cache/
+/.clangd
+/.nvim.lua
+compile_commands.json
+*.o
+*.swp
