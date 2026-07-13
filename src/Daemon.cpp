@@ -1,6 +1,10 @@
 #include "Daemon.hpp"
 #include "Clock.hpp"
+#include "DesktopContext.hpp"
+#include "Executor.hpp"
 #include "Feedback.hpp"
+#include "GazeResolver.hpp"
+#include "IntentPipeline.hpp"
 #include "Log.hpp"
 #include "Pipeline.hpp"
 
@@ -127,6 +131,16 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
     m_lastText    = t.text;
     m_lastOnsetMs = t.onsetMs;
     Feedback::emitTranscript(t, m_cfg);
+
+    // WP-V4 intent tier: transcript -> context snapshot -> command -> executor. Uses
+    // the live compositor for the read-only snapshot + gaze ring, and the executor's
+    // (default dry-run) actuator. All injected here so the pipeline stays testable.
+    if (m_cfg.intent.enabled) {
+        auto r = IntentPipeline::process(t, m_cfg, defaultHyprctlQuery, defaultGazeQuery,
+                                         defaultRunner);
+        m_lastAction = std::string(verbName(r.action.verb)) +
+                       (r.action.target.empty() ? "" : " " + r.action.target);
+    }
 }
 
 std::string CDaemon::chooseSource() const {
@@ -221,6 +235,12 @@ std::string CDaemon::statusJson() const {
     o += ",\"lastOnsetMs\":" + std::to_string(m_lastOnsetMs);
     o += ",\"lastText\":\"";
     for (char c : m_lastText) { if (c == '"' || c == '\\') o += '\\'; o += c; }
+    o += "\"";
+    o += ",\"intentEnabled\":" + std::string(m_cfg.intent.enabled ? "true" : "false");
+    o += ",\"intentBackend\":\"" + m_cfg.intent.backend + "\"";
+    o += ",\"executorDryRun\":" + std::string(m_cfg.executor.dryRun ? "true" : "false");
+    o += ",\"lastAction\":\"";
+    for (char c : m_lastAction) { if (c == '"' || c == '\\') o += '\\'; o += c; }
     o += "\"";
     o += "}";
     return o;

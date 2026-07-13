@@ -43,6 +43,12 @@ add_library(hypxrvoice_core STATIC
     src/ControlSocket.cpp
     src/Feedback.cpp
     src/Pipeline.cpp
+    src/Command.cpp
+    src/DesktopContext.cpp
+    src/GazeResolver.cpp
+    src/Intent.cpp
+    src/Executor.cpp
+    src/IntentPipeline.cpp
     src/Daemon.cpp
 )
 target_include_directories(hypxrvoice_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -78,6 +84,11 @@ add_executable(hypxrvoice_tests
     tests/test_transcript.cpp
     tests/test_compositor.cpp
     tests/test_oneshot.cpp
+    tests/test_context.cpp
+    tests/test_gaze.cpp
+    tests/test_executor.cpp
+    tests/test_intent.cpp
+    tests/test_pipeline.cpp
 )
 target_include_directories(hypxrvoice_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 target_link_libraries(hypxrvoice_tests PRIVATE hypxrvoice_core)

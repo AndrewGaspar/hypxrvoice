@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -63,6 +64,34 @@ struct SConfig {
         bool enabled = true;
         int  pollMs  = 1000;
     } compositor;
+
+    // WP-V4 intent tier: transcript -> typed command.
+    struct {
+        bool        enabled = true;
+        std::string backend = "rule";  // "rule" (deterministic) | "llama" (local GGUF).
+        std::string model;             // GGUF path for the llama backend (required for it).
+        double      temperature = 0.0; // llama sampling temperature (0 = greedy).
+        int         nThreads    = 4;   // llama decode threads.
+        int         contextMaxMonitors = 16; // digest caps (prompt-size bound).
+        int         contextMaxApps     = 6;
+        int         deixisWindowMs = 300; // gaze stability window.
+        int         deixisLeadMs   = 200; // gaze-leads-speech shift.
+        int         deixisSamples  = 5;
+        double      distanceStep   = 0.25; // "closer"/"further" step (m).
+    } intent;
+
+    // WP-V4 executor: typed command -> allowlisted hyprctl argv.
+    struct {
+        bool dryRun         = true;  // DEFAULT: log argv, actuate nothing.
+        bool allowXrmonitor = true;  // permit openxr/xrmonitor actuation.
+        bool allowLaunch    = false; // permit app launch (allowlisted only).
+        bool targetedGrab   = false; // compositor advertises `gazegrab <name>` (GAP).
+        bool placeAtPose    = false; // compositor advertises `place <name> at …` (GAP).
+    } executor;
+
+    // [apps] allowlist: spoken app key -> a TRUSTED launch command (uwsm/systemd-run).
+    // Never derived from transcript text; consumed only by launch_app.
+    std::map<std::string, std::string> apps;
 };
 
 // Parse a TOML-subset config document. Returns true on success. Unknown keys are

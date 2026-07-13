@@ -35,4 +35,37 @@ namespace Feedback {
         if (cfg.feedback.notify && !t.text.empty())
             notify("hypxrvoice", t.text);
     }
+
+    void emitAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg) {
+        // Single machine-readable line: {"kind":"action","action":{…},"plan":{…}}.
+        if (cfg.feedback.stdoutJson) {
+            std::fprintf(stdout, "{\"kind\":\"action\",\"action\":%s,\"plan\":%s}\n",
+                         a.toJson().c_str(), plan.toJson().c_str());
+            std::fflush(stdout);
+        }
+        Log::log(Log::INFO, "intent [{}] target={} src={} conf={:.2f} steps={} {}",
+                 verbName(a.verb), a.target.empty() ? "-" : a.target,
+                 targetSourceName(a.targetSource), a.confidence, plan.steps.size(),
+                 plan.approximated ? "(approx)" : "");
+
+        // A human-facing toast: the phrasing + a low-confidence / clarify hint.
+        if (cfg.feedback.notify) {
+            std::string body;
+            if (a.verb == EVerb::Clarify)
+                body = a.clarifyQuestion.empty() ? "please clarify" : a.clarifyQuestion;
+            else if (a.verb == EVerb::None)
+                body = ""; // nothing spoken that was a command — stay silent
+            else {
+                body = std::string(verbName(a.verb));
+                if (!a.target.empty() && a.target != "active")
+                    body += " " + a.target;
+                if (a.confidence < 0.6)
+                    body += " (unsure)";
+                if (!plan.ok && !plan.reason.empty())
+                    body += " — " + plan.reason;
+            }
+            if (!body.empty())
+                notify("hypxrvoice", body);
+        }
+    }
 }

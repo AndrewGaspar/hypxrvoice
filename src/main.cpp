@@ -2,7 +2,11 @@
 #include "Clock.hpp"
 #include "Config.hpp"
 #include "Daemon.hpp"
+#include "DesktopContext.hpp"
+#include "Executor.hpp"
 #include "Feedback.hpp"
+#include "GazeResolver.hpp"
+#include "IntentPipeline.hpp"
 #include "Log.hpp"
 #include "Pipeline.hpp"
 #include "Vad.hpp"
@@ -27,6 +31,8 @@ static void printUsage(const char* argv0) {
                  "  --oneshot <file>    Debug/test: transcribe an audio file through the full\n"
                  "                      VAD->ASR->transcript pipeline (no mic) and print each\n"
                  "                      transcript as a JSON line, then exit.\n"
+                 "  --intent            With --oneshot: also run each transcript through the\n"
+                 "                      intent tier + executor (honours executor.dry_run).\n"
                  "  --model <path>      Override asr.model (whisper ggml model path).\n"
                  "  --verbose           Enable DEBUG logging.\n"
                  "  -h, --help          Show this help.\n"
@@ -38,7 +44,7 @@ static void printUsage(const char* argv0) {
 
 // Offline pipeline: file -> VAD segments -> ASR -> transcripts. Shares the exact
 // segment path with the live daemon (Pipeline::processSegment).
-static int runOneshot(const std::string& file, const SConfig& cfg) {
+static int runOneshot(const std::string& file, const SConfig& cfg, bool runIntent) {
     CAsr          asr;
     std::string   err;
     CAsr::SParams ap{cfg.asr.model, cfg.asr.language, cfg.asr.threads, cfg.asr.translate};
@@ -81,6 +87,16 @@ static int runOneshot(const std::string& file, const SConfig& cfg) {
         if (Pipeline::processSegment(asr, cfg, s, EActivation::Oneshot, /*requireWake=*/false, t)) {
             Feedback::emitTranscript(t, cfg);
             emitted++;
+            // --intent: run the transcript through the full V4 chain against the live
+            // compositor (read-only snapshot + gaze ring; executor honours dry_run).
+            if (runIntent) {
+                const int64_t t0 = Clock::monotonicMs();
+                auto r = IntentPipeline::process(t, cfg, defaultHyprctlQuery, defaultGazeQuery,
+                                                 defaultRunner);
+                Log::log(Log::INFO, "intent resolved in {}ms: {} target={}",
+                         Clock::monotonicMs() - t0, verbName(r.action.verb),
+                         r.action.target.empty() ? "-" : r.action.target);
+            }
         }
     }
     return emitted > 0 ? 0 : 2;
@@ -90,6 +106,7 @@ int main(int argc, char** argv) {
     std::string configPath = defaultConfigPath();
     std::string oneshot;
     std::string modelOverride;
+    bool        oneshotIntent = false;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -107,6 +124,8 @@ int main(int argc, char** argv) {
             configPath = needVal("--config");
         } else if (a == "--oneshot") {
             oneshot = needVal("--oneshot");
+        } else if (a == "--intent") {
+            oneshotIntent = true;
         } else if (a == "--model") {
             modelOverride = needVal("--model");
         } else if (a == "--verbose") {
@@ -132,7 +151,7 @@ int main(int argc, char** argv) {
         cfg.asr.model = modelOverride;
 
     if (!oneshot.empty())
-        return runOneshot(oneshot, cfg);
+        return runOneshot(oneshot, cfg, oneshotIntent);
 
     // Daemon mode.
     struct sigaction sa = {};

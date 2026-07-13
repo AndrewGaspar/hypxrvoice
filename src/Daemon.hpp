@@ -78,4 +78,5 @@ class CDaemon {
     std::string m_lastText;
     int64_t     m_lastOnsetMs = 0;
     std::string m_lastRawStatus;
+    std::string m_lastAction; // last resolved command (verb + target), for `status`
 };

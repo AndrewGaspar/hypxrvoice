@@ -106,6 +106,12 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
         err("expected a number");
         return false;
     };
+    auto setDouble = [&](double& dst, const std::string& v) {
+        double d;
+        if (asFloat(v, d)) { dst = d; return true; }
+        err("expected a number");
+        return false;
+    };
     auto setBool = [&](bool& dst, const std::string& v) {
         bool b;
         if (asBool(v, b)) { dst = b; return true; }
@@ -193,6 +199,45 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.compositor.enabled, val);
         } else if (k == "compositor.poll_ms") {
             setInt(out.compositor.pollMs, val);
+        } else if (k == "intent.enabled") {
+            setBool(out.intent.enabled, val);
+        } else if (k == "intent.backend") {
+            setStr(out.intent.backend, val);
+        } else if (k == "intent.model") {
+            setStr(out.intent.model, val);
+        } else if (k == "intent.temperature") {
+            setDouble(out.intent.temperature, val);
+        } else if (k == "intent.threads") {
+            setInt(out.intent.nThreads, val);
+        } else if (k == "intent.context_max_monitors") {
+            setInt(out.intent.contextMaxMonitors, val);
+        } else if (k == "intent.context_max_apps") {
+            setInt(out.intent.contextMaxApps, val);
+        } else if (k == "intent.deixis_window_ms") {
+            setInt(out.intent.deixisWindowMs, val);
+        } else if (k == "intent.deixis_lead_ms") {
+            setInt(out.intent.deixisLeadMs, val);
+        } else if (k == "intent.deixis_samples") {
+            setInt(out.intent.deixisSamples, val);
+        } else if (k == "intent.distance_step_m") {
+            setDouble(out.intent.distanceStep, val);
+        } else if (k == "executor.dry_run") {
+            setBool(out.executor.dryRun, val);
+        } else if (k == "executor.allow_xrmonitor") {
+            setBool(out.executor.allowXrmonitor, val);
+        } else if (k == "executor.allow_launch") {
+            setBool(out.executor.allowLaunch, val);
+        } else if (k == "executor.targeted_grab") {
+            setBool(out.executor.targetedGrab, val);
+        } else if (k == "executor.place_at_pose") {
+            setBool(out.executor.placeAtPose, val);
+        } else if (section == "apps") {
+            // [apps] allowlist: any key is an app alias mapped to a trusted command.
+            std::string s;
+            if (asString(val, s))
+                out.apps[key] = s;
+            else
+                err("app allowlist value must be a quoted command string");
         } else {
             warn("unknown key '" + k + "' (ignored)");
         }
