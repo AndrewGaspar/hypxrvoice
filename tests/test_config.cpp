@@ -1,0 +1,81 @@
+#include "doctest.h"
+
+#include "Config.hpp"
+
+TEST_CASE("config: parses sections and typed values") {
+    const char* doc = R"(
+# hypxrvoice config
+[activation]
+mode = "wake"
+fallback = "gate"
+keyboard_idle_ms = 2500
+
+[audio]
+source = "wivrn.source"   # trailing comment ignored
+sample_rate = 16000
+
+[vad]
+energy_threshold = 0.02
+start_ms = 120
+
+[wake]
+enabled = false
+phrase = "hey hypr"
+fuzz = 3
+
+[asr]
+model = "/models/ggml-base.en.bin"
+threads = 6
+translate = true
+)";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    REQUIRE(parseConfig(doc, c, errs, warns));
+    CHECK(errs.empty());
+    CHECK(c.activation.mode == EActivationMode::Wake);
+    CHECK(c.activation.fallback == EFallback::Gate);
+    CHECK(c.activation.keyboardIdleMs == 2500);
+    CHECK(c.audio.source == "wivrn.source");
+    CHECK(c.audio.sampleRate == 16000);
+    CHECK(c.vad.energyThreshold == doctest::Approx(0.02));
+    CHECK(c.vad.startMs == 120);
+    CHECK(c.wake.enabled == false);
+    CHECK(c.wake.phrase == "hey hypr");
+    CHECK(c.wake.fuzz == 3);
+    CHECK(c.asr.model == "/models/ggml-base.en.bin");
+    CHECK(c.asr.threads == 6);
+    CHECK(c.asr.translate == true);
+}
+
+TEST_CASE("config: unknown keys warn but do not fail") {
+    const char* doc = "[activation]\nmode = \"auto\"\nnonsense = 3\n";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    CHECK(parseConfig(doc, c, errs, warns));
+    CHECK(errs.empty());
+    CHECK(warns.size() == 1);
+}
+
+TEST_CASE("config: type errors fail the parse") {
+    const char* doc = "[audio]\nsample_rate = \"lots\"\n";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    CHECK_FALSE(parseConfig(doc, c, errs, warns));
+    CHECK_FALSE(errs.empty());
+}
+
+TEST_CASE("config: bad enum value is an error") {
+    const char* doc = "[activation]\nmode = \"telepathy\"\n";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    CHECK_FALSE(parseConfig(doc, c, errs, warns));
+}
+
+TEST_CASE("config: empty document yields defaults") {
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    CHECK(parseConfig("", c, errs, warns));
+    CHECK(c.activation.mode == EActivationMode::Auto);
+    CHECK(c.wake.phrase == "hey hypr");
+    CHECK(c.audio.sampleRate == 16000);
+}
