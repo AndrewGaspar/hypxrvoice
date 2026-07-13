@@ -106,10 +106,13 @@ distance_step_m = 0.25      # "closer"/"further" step
 dry_run = true
 allow_xrmonitor = true  # permit openxr/xrmonitor actuation (when dry_run=false)
 allow_launch = false    # permit app launch — only from the [apps] allowlist below
-# Optional compositor verbs (see docs/COMPOSITOR-GAPS.md). Leave false unless your
-# HypXRland advertises them; the executor uses documented approximations otherwise.
-targeted_grab = false   # `openxr gazegrab <name>` — grab a NAMED monitor
-place_at_pose = false   # `openxr place <name> at x,y,z` — drop at the resolved gaze point
+# Compositor verbs from docs/COMPOSITOR-GAPS.md — SHIPPED in HypXRland 727c457e+
+# (targeted `gazegrab <name>`, `place <name> at x,y,z`). On older builds set these
+# false and the executor falls back to the documented approximations. Note: confirm
+# a targeted grab via `gaze.carrying`/`gaze.carryMonitor` in `-j openxr status`,
+# not the per-monitor `grabbed` flag (that flag is hand/controller grabs only).
+targeted_grab = true    # `openxr gazegrab <name>` — grab a NAMED monitor
+place_at_pose = true    # `openxr place <name> at x,y,z` — drop at the resolved gaze point
 
 # ---- app-launch allowlist: spoken alias -> a TRUSTED launch command ----
 # Never derived from transcript text. Use the uwsm/systemd-run pattern.
