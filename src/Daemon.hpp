@@ -42,6 +42,9 @@ class CDaemon {
     // ---- mic gating ----
     void applyMicPolicy();      // open/close capture to match the state machine
     std::string chooseSource() const;
+    void updateListeningHud();  // show "listening…" only while actually capturing
+
+    void closePttWindow();      // flush + settle + disarm the PTT deadline (single path)
 
     // ---- periodic ----
     void tick(); // ~4 Hz: compositor poll cadence + listen timeout
@@ -74,8 +77,15 @@ class CDaemon {
 
     SEnvSignal m_env{};
     int64_t    m_lastPollMs   = 0;
-    int64_t    m_listenSinceMs = 0;
+    int64_t    m_pttDeadlineMs = 0; // absolute deadline for the OPEN PTT window (0 = none)
     EState     m_lastState    = EState::GatedKeyboard;
+    bool       m_hudListening = false; // we currently own the HUD with a listening panel
+    int64_t    m_lastAudioLogMs = 0;   // throttle for the periodic capture-stats DEBUG log
+
+    // ---- live audio observability (PW-thread writes, main-thread reads) ----
+    std::atomic<uint64_t> m_framesReceived{0};   // total frames delivered by capture
+    std::atomic<uint32_t> m_inRms1e4{0};         // rolling input RMS  * 1e4
+    std::atomic<uint32_t> m_inPeak1e4{0};        // rolling input peak * 1e4
 
     // last transcript summary for `status`
     std::string m_lastText;

@@ -147,6 +147,27 @@ target_compile_definitions(hypxrvoice_tests PRIVATE
 )
 add_test(NAME hypxrvoice_tests COMMAND hypxrvoice_tests)
 
+# ---- live-capture loopback integration test (bug #1: live PipeWire -> VAD -> ASR) ----
+# Plays a noisy JFK fixture through a self-owned PipeWire null sink and captures its
+# monitor through the REAL CAudioCapture path, asserting adaptive-VAD onset + a
+# transcript with per-word timestamps. Self-skips when PipeWire tooling is absent, and
+# is only RUN by ctest when HYPXRVOICE_LOOPBACK=1 (so a normal run never touches live
+# audio); build it always so it stays compiling.
+add_executable(hypxrvoice_loopback_tests tests/test_loopback.cpp)
+target_include_directories(hypxrvoice_loopback_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_link_libraries(hypxrvoice_loopback_tests PRIVATE hypxrvoice_core)
+target_compile_options(hypxrvoice_loopback_tests PRIVATE -Wall -Wextra)
+target_compile_definitions(hypxrvoice_loopback_tests PRIVATE
+    HYPXRVOICE_TEST_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/tests/assets"
+    HYPXRVOICE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+if(DEFINED ENV{HYPXRVOICE_LOOPBACK} AND "$ENV{HYPXRVOICE_LOOPBACK}" STREQUAL "1")
+    add_test(NAME hypxrvoice_loopback_tests COMMAND hypxrvoice_loopback_tests)
+    set_tests_properties(hypxrvoice_loopback_tests PROPERTIES TIMEOUT 120)
+else()
+    add_test(NAME hypxrvoice_loopback_tests
+             COMMAND ${CMAKE_COMMAND} -E echo "SKIP: set HYPXRVOICE_LOOPBACK=1 to run the live PipeWire loopback test")
+endif()
+
 # ---- WP-H8: D-Bus integration test against the REAL hypxrhud daemon ----
 # Spawns the actual hypxrhud binary (--no-xr) on a PRIVATE session bus (dbus-run-session)
 # and drives it through CHudClient: a listening->update->dismiss round-trip asserted via

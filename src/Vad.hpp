@@ -16,12 +16,27 @@
 // interface below is the seam where a silero backend would drop in later.
 struct SVadConfig {
     int   sampleRate      = 16000;
-    float energyThreshold = 0.012f; // RMS above this = voiced
+    float energyThreshold = 0.012f; // RMS floor: a frame below this is ALWAYS silence
     int   startMs         = 150;    // sustained voiced to declare onset
     int   endMs           = 600;    // sustained silence (hangover) to declare end
     int   maxUtteranceMs  = 12000;
     int   preRollMs       = 300;    // audio retained before the onset instant
     int   frameMs         = 20;     // analysis window
+
+    // Noise-floor-adaptive gating. A FIXED energyThreshold cannot survive a hot,
+    // AGC-driven source (e.g. the Quest/WiVRn mic, whose ambient RMS ran ~0.09 —
+    // far above 0.012): every frame reads "voiced", the utterance never sees the
+    // 600 ms of trailing silence needed to endpoint, and it runs to maxUtteranceMs
+    // transcribing noise (presenting as "listening… no response"). With `adaptive`,
+    // the detector estimates the noise floor as a low percentile of the RMS over a
+    // rolling window and gates at max(energyThreshold, floor * noiseFloorFactor): a
+    // low percentile tracks the ambient/pauses (persistent) without being dragged up
+    // by transient speech bursts, so onset needs speech ABOVE the ambient and pauses
+    // fall back below it to endpoint. Converges within the window with no warmup, so
+    // onset timing on a quiet source is unchanged.
+    bool  adaptive        = true;
+    float noiseFloorFactor = 1.6f;  // voiced threshold = floor * this (>= energyThreshold)
+    int   noiseWindowMs   = 1500;   // rolling window for the noise-floor percentile
 };
 
 struct SSpeechSegment {
@@ -48,13 +63,26 @@ class CVad {
     bool    inSpeech() const { return m_inSpeech; }
     int64_t currentOnsetMs() const { return m_onsetMs; }
 
+    // ---- observability (main-thread reads; snapshot of the last analysed frame) ----
+    float lastRms() const { return m_lastRms; }           // RMS of the most recent frame
+    float noiseFloor() const { return m_noiseFloor; }     // current adaptive floor estimate
+    float threshold() const { return currentThreshold(); }// the live voiced threshold
+
   private:
-    void processFrame(const float* frame, int64_t frameStartMs, std::vector<SSpeechSegment>& out);
-    void emit(int64_t endMs, std::vector<SSpeechSegment>& out);
+    void  processFrame(const float* frame, int64_t frameStartMs, std::vector<SSpeechSegment>& out);
+    void  emit(int64_t endMs, std::vector<SSpeechSegment>& out);
+    float currentThreshold() const;
 
     SVadConfig m_cfg;
     size_t     m_frameSamples;
     size_t     m_preRollFrames;
+
+    // Adaptive noise-floor state: a rolling window of recent frame RMS values whose
+    // low percentile is the ambient-floor estimate.
+    std::deque<float> m_rmsWindow;      // recent per-frame RMS (bounded by m_windowFrames)
+    size_t            m_windowFrames = 75;
+    float             m_noiseFloor   = 0.f; // last computed floor estimate (observability)
+    float             m_lastRms      = 0.f; // RMS of the last frame (observability)
 
     std::vector<float> m_pending;   // leftover samples not yet a full frame
     int64_t            m_baseMonoMs = 0;

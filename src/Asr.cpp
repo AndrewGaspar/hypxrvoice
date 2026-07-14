@@ -56,6 +56,13 @@ bool CAsr::load(const SParams& params, std::string& err) {
     }
 
     whisper_context_params cparams = whisper_context_default_params();
+    // whisper_context_default_params() defaults flash_attn=true, and whisper SILENTLY
+    // disables DTW token timestamps when flash_attn is on ("dtw_token_timestamps is not
+    // supported with flash_attn - disabling"). DTW word timestamps are REQUIRED (the
+    // gaze word-time contract), so turn flash_attn OFF — this box runs whisper on CPU
+    // anyway, where flash_attn buys nothing. m_dtw below now reflects whisper's REAL
+    // state (DTW genuinely engages) rather than merely what we requested.
+    cparams.flash_attn = false;
     whisper_alignment_heads_preset preset = aheadsForModel(params.modelPath);
     if (preset != WHISPER_AHEADS_NONE) {
         cparams.dtw_token_timestamps = true;

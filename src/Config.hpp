@@ -34,11 +34,15 @@ struct SConfig {
     } audio;
 
     struct {
-        float energyThreshold = 0.012f; // RMS above this = voiced
+        float energyThreshold = 0.012f; // RMS floor: a frame below this is always silence
         int   startMs         = 150;    // sustained voiced to declare onset
         int   endMs           = 600;    // sustained silence (hangover) to end
         int   maxUtteranceMs  = 12000;
         int   preRollMs       = 300;    // audio retained before the onset point
+        // Noise-floor-adaptive gating (survives a hot AGC source like the WiVRn mic).
+        bool  adaptive         = true;
+        float noiseFloorFactor = 1.6f;  // voiced threshold = max(energy_threshold, floor*factor)
+        int   noiseWindowMs    = 1500;  // rolling window for the noise-floor percentile
     } vad;
 
     struct {

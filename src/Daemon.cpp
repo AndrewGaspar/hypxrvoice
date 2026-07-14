@@ -8,7 +8,10 @@
 #include "Log.hpp"
 #include "Pipeline.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -32,6 +35,9 @@ void CDaemon::resetVad() {
     vc.endMs           = m_cfg.vad.endMs;
     vc.maxUtteranceMs  = m_cfg.vad.maxUtteranceMs;
     vc.preRollMs       = m_cfg.vad.preRollMs;
+    vc.adaptive        = m_cfg.vad.adaptive;
+    vc.noiseFloorFactor = m_cfg.vad.noiseFloorFactor;
+    vc.noiseWindowMs   = m_cfg.vad.noiseWindowMs;
     m_vad              = std::make_unique<CVad>(vc);
 }
 
@@ -116,6 +122,30 @@ void CDaemon::loadIntentBackend() {
 }
 
 void CDaemon::onAudio(const float* frames, size_t n, int64_t monoMs) {
+    // Live observability (updated on the RT callback thread; lock-free atomics). This
+    // is what turns "silent source vs dead path" into a 5-second `status` diagnosis:
+    // frames-received proves the PW callback delivers PCM at all, and the rolling
+    // RMS/peak show the actual signal level our capture path sees.
+    if (n > 0) {
+        double acc  = 0;
+        float  peak = 0;
+        for (size_t i = 0; i < n; i++) {
+            const float a = frames[i] < 0 ? -frames[i] : frames[i];
+            acc += static_cast<double>(frames[i]) * frames[i];
+            if (a > peak)
+                peak = a;
+        }
+        const float rms = static_cast<float>(std::sqrt(acc / n));
+        // ~1 s rolling EMA over capture callbacks (they arrive at a few hundred Hz).
+        const float prev = m_inRms1e4.load(std::memory_order_relaxed) / 1e4f;
+        const float ema  = prev + 0.15f * (rms - prev);
+        m_inRms1e4.store(static_cast<uint32_t>(ema * 1e4f), std::memory_order_relaxed);
+        // Peak: decay the running peak, but latch any louder frame immediately.
+        const float pprev  = m_inPeak1e4.load(std::memory_order_relaxed) / 1e4f;
+        const float pdecay = pprev * 0.9f;
+        m_inPeak1e4.store(static_cast<uint32_t>(std::max(peak, pdecay) * 1e4f), std::memory_order_relaxed);
+        m_framesReceived.fetch_add(n, std::memory_order_relaxed);
+    }
     {
         std::lock_guard<std::mutex> lk(m_qMu);
         m_queue.push_back(SChunk{std::vector<float>(frames, frames + n), monoMs});
@@ -137,6 +167,7 @@ void CDaemon::drainAudio() {
         m_vad->push(c.samples.data(), c.samples.size(), c.monoMs, segs);
     for (auto& s : segs)
         handleSegment(s);
+    updateListeningHud(); // reflect the latest VAD in-speech state on the HUD.
 }
 
 void CDaemon::handleSegment(const SSpeechSegment& seg) {
@@ -156,6 +187,9 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
     }
     m_lastText    = t.text;
     m_lastOnsetMs = t.onsetMs;
+    // A real transcript/action panel now owns the HUD; relinquish the listening panel
+    // so updateListeningHud() won't hide the action out from under it.
+    m_hudListening = false;
     Feedback::emitTranscript(t, m_cfg);
 
     // WP-V4 intent tier: transcript -> context snapshot -> command -> executor. Uses
@@ -187,13 +221,34 @@ void CDaemon::applyMicPolicy() {
     const bool want = m_machine.micShouldBeOpen();
     if (want && !m_audio.running()) {
         resetVad();
-        m_listenSinceMs = Clock::monotonicMs();
+        m_framesReceived.store(0, std::memory_order_relaxed);
+        m_inRms1e4.store(0, std::memory_order_relaxed);
+        m_inPeak1e4.store(0, std::memory_order_relaxed);
         m_audio.start(chooseSource(), m_cfg.audio.sampleRate,
                       [this](const float* f, size_t n, int64_t ms) { onAudio(f, n, ms); });
-        Feedback::onListeningStart(m_cfg); // show the HUD listening panel.
+        // NOTE: opening the mic does NOT mean "listening" — in ARMED_WAKEWORD the mic
+        // is open at DON but nothing is being transcribed. The listening panel is driven
+        // by updateListeningHud() from the actual utterance-capture signal, so the HUD
+        // stays honest (no "listening…" merely because the wake word is armed).
     } else if (!want && m_audio.running()) {
         m_audio.stop();
-        Feedback::onListeningStop(m_cfg); // hide it if no command landed.
+        updateListeningHud(); // capture closed → drop any listening panel we own.
+    }
+}
+
+void CDaemon::updateListeningHud() {
+    // Honest mapping: show "listening…" only while we are ACTUALLY capturing an
+    // utterance — VAD in-speech (wake or PTT), or a freshly opened PTT window before
+    // onset. ARMED_WAKEWORD alone shows nothing (see applyMicPolicy).
+    const bool pttOpen = m_machine.state() == EState::Listening &&
+                         m_machine.currentActivation() == EActivation::PushToTalk;
+    const bool capturing = (m_vad && m_vad->inSpeech()) || pttOpen;
+    if (capturing && !m_hudListening) {
+        Feedback::onListeningStart(m_cfg);
+        m_hudListening = true;
+    } else if (!capturing && m_hudListening) {
+        Feedback::onListeningStop(m_cfg);
+        m_hudListening = false;
     }
 }
 
@@ -204,20 +259,32 @@ void CDaemon::tick() {
         m_env        = m_compositor.poll(&m_lastRawStatus);
         m_machine.onEnv(m_env);
     }
-    // Safety: a stuck PTT window (client crashed without `ptt stop`) auto-closes.
-    if (m_machine.state() == EState::Listening && m_machine.currentActivation() == EActivation::PushToTalk) {
-        if (now - m_listenSinceMs > m_cfg.vad.maxUtteranceMs + 5000) {
+    // Safety: a stuck PTT window (client crashed without `ptt stop`) auto-closes at its
+    // deadline. The deadline is armed when the window OPENS (closePttWindow / onPttStart)
+    // and cleared when it closes, so it can never fire on a stale timestamp or stack
+    // across repeated toggles.
+    if (m_pttDeadlineMs != 0 && m_machine.state() == EState::Listening &&
+        m_machine.currentActivation() == EActivation::PushToTalk) {
+        if (now >= m_pttDeadlineMs) {
             Log::log(Log::WARN, "PTT window timed out; closing");
-            drainAudio();
-            std::vector<SSpeechSegment> segs;
-            if (m_vad && m_vad->flush(segs))
-                for (auto& s : segs) handleSegment(s);
-            m_machine.onPttStop();
-            m_machine.onTranscribeDone();
+            closePttWindow();
         }
     }
     applyMicPolicy();
+    updateListeningHud();
     Feedback::pollRuntime(); // drain the hypxrhud bus fd (runtime/ownership signals).
+
+    // Periodic capture telemetry (every ~30 s while the mic is open): the same fields
+    // `status` reports, logged so a silent source or dead path is obvious in the journal.
+    if (m_audio.running() && now - m_lastAudioLogMs >= 30000) {
+        m_lastAudioLogMs = now;
+        Log::log(Log::DEBUG, "capture: frames={} inRms={:.4f} inPeak={:.4f} vad[{}] floor={:.4f} thr={:.4f}",
+                 m_framesReceived.load(std::memory_order_relaxed),
+                 m_inRms1e4.load(std::memory_order_relaxed) / 1e4f,
+                 m_inPeak1e4.load(std::memory_order_relaxed) / 1e4f,
+                 (m_vad && m_vad->inSpeech()) ? "speech" : "idle",
+                 m_vad ? m_vad->noiseFloor() : 0.f, m_vad ? m_vad->threshold() : 0.f);
+    }
 
     if (m_machine.state() != m_lastState) {
         Log::log(Log::DEBUG, "state {} -> {}", stateName(m_lastState), stateName(m_machine.state()));
@@ -225,25 +292,46 @@ void CDaemon::tick() {
     }
 }
 
+// Close an open PTT capture window: flush any in-progress utterance, settle the state
+// machine back to its base gate, and disarm the safety deadline. Single path so the
+// deadline is always cleared (no stacking) whether the close came from `ptt stop`,
+// `ptt toggle`, or the timeout.
+void CDaemon::closePttWindow() {
+    drainAudio();
+    std::vector<SSpeechSegment> segs;
+    if (m_vad && m_vad->flush(segs))
+        for (auto& s : segs) handleSegment(s);
+    m_machine.onPttStop();
+    m_machine.onTranscribeDone();
+    m_pttDeadlineMs = 0;
+    updateListeningHud();
+}
+
 std::string CDaemon::handleControl(const std::string& cmd) {
     if (cmd == "ptt start" || cmd == "ptt") {
         m_machine.onPttStart();
+        // Arm the auto-close deadline only if we actually opened a PTT window. Set from
+        // "now" on every open (the mic may already have been open in ARMED_WAKEWORD, in
+        // which case applyMicPolicy would not have refreshed a start marker) so the
+        // window gets its full duration and never times out on a stale timestamp.
+        if (m_machine.state() == EState::Listening &&
+            m_machine.currentActivation() == EActivation::PushToTalk)
+            m_pttDeadlineMs = Clock::monotonicMs() + m_cfg.vad.maxUtteranceMs + 5000;
         applyMicPolicy();
+        updateListeningHud();
         return "ok: listening";
     }
     if (cmd == "ptt stop") {
-        // Flush the in-progress utterance, then settle back to the base gate.
-        drainAudio();
-        std::vector<SSpeechSegment> segs;
-        if (m_vad && m_vad->flush(segs))
-            for (auto& s : segs) handleSegment(s);
-        m_machine.onPttStop();
-        m_machine.onTranscribeDone();
+        closePttWindow(); // flush + settle + disarm the deadline (no stacking).
         applyMicPolicy();
         return "ok: stopped";
     }
     if (cmd == "ptt toggle") {
-        if (m_machine.state() == EState::Listening)
+        // True toggle: a second press while a PTT window is open CLOSES it. Only a
+        // PTT-initiated window is toggled off — a wake-word capture in progress is left
+        // to VAD, not cut short by the PTT key.
+        if (m_machine.state() == EState::Listening &&
+            m_machine.currentActivation() == EActivation::PushToTalk)
             return handleControl("ptt stop");
         return handleControl("ptt start");
     }
@@ -260,6 +348,20 @@ std::string CDaemon::statusJson() const {
     o += "\"state\":\"" + std::string(stateName(m_machine.state())) + "\"";
     o += ",\"mode\":\"" + modeStr + "\"";
     o += ",\"micOpen\":" + std::string(m_audio.running() ? "true" : "false");
+    // Live audio observability: input level (rolling ~1 s), VAD state, and the
+    // frames-received counter — enough to tell a silent source from a dead path.
+    {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      ",\"inputRms\":%.4f,\"inputPeak\":%.4f,\"framesReceived\":%llu"
+                      ",\"vadInSpeech\":%s,\"vadNoiseFloor\":%.4f,\"vadThreshold\":%.4f",
+                      m_inRms1e4.load(std::memory_order_relaxed) / 1e4f,
+                      m_inPeak1e4.load(std::memory_order_relaxed) / 1e4f,
+                      static_cast<unsigned long long>(m_framesReceived.load(std::memory_order_relaxed)),
+                      (m_vad && m_vad->inSpeech()) ? "true" : "false",
+                      m_vad ? m_vad->noiseFloor() : 0.f, m_vad ? m_vad->threshold() : 0.f);
+        o += buf;
+    }
     o += ",\"compositorAvailable\":" + std::string(m_env.compositorAvailable ? "true" : "false");
     o += ",\"headsetPresent\":" + std::string(m_env.headsetPresent ? "true" : "false");
     o += ",\"atKeyboard\":" + std::string(m_env.atKeyboard ? "true" : "false");

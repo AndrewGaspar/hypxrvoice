@@ -175,6 +175,12 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setInt(out.vad.maxUtteranceMs, val);
         } else if (k == "vad.pre_roll_ms") {
             setInt(out.vad.preRollMs, val);
+        } else if (k == "vad.adaptive") {
+            setBool(out.vad.adaptive, val);
+        } else if (k == "vad.noise_floor_factor") {
+            setFloat(out.vad.noiseFloorFactor, val);
+        } else if (k == "vad.noise_window_ms") {
+            setInt(out.vad.noiseWindowMs, val);
         } else if (k == "wake.enabled") {
             setBool(out.wake.enabled, val);
         } else if (k == "wake.backend") {

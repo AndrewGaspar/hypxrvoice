@@ -101,8 +101,20 @@ bool CAudioCapture::start(const std::string& source, int sampleRate, Callback cb
         PW_KEY_APP_NAME, "hypxrvoice",
         PW_KEY_NODE_NAME, "hypxrvoice-capture",
         nullptr);
-    if (!source.empty())
-        pw_properties_set(props, PW_KEY_TARGET_OBJECT, source.c_str());
+    // A ".monitor" source names a SINK's monitor (the pulse-style convention, e.g.
+    // "alsa_output.…​.monitor"). In native PipeWire a sink monitor is not a distinct
+    // source node — it is captured by connecting to the SINK node with
+    // stream.capture.sink=true — so translate the name and set that flag. This makes
+    // desktop/played-audio capture work (the AEC seam above) and lets the loopback
+    // integration test drive the real capture path through a null-sink monitor.
+    std::string target = source;
+    if (const std::string suffix = ".monitor";
+        target.size() > suffix.size() && target.compare(target.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        pw_properties_set(props, PW_KEY_STREAM_CAPTURE_SINK, "true");
+        target.erase(target.size() - suffix.size()); // target the sink node itself
+    }
+    if (!target.empty())
+        pw_properties_set(props, PW_KEY_TARGET_OBJECT, target.c_str());
 
     pw_thread_loop_lock(m_impl->loop);
 

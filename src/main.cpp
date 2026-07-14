@@ -85,6 +85,9 @@ static int runOneshot(const std::string& file, const SConfig& cfg, bool runInten
     vc.endMs           = cfg.vad.endMs;
     vc.maxUtteranceMs  = cfg.vad.maxUtteranceMs;
     vc.preRollMs       = cfg.vad.preRollMs;
+    vc.adaptive        = cfg.vad.adaptive;
+    vc.noiseFloorFactor = cfg.vad.noiseFloorFactor;
+    vc.noiseWindowMs   = cfg.vad.noiseWindowMs;
     CVad vad(vc);
 
     // Anchor the file's virtual capture start to "now" so onset/word timestamps are

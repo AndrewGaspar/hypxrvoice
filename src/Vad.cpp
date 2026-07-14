@@ -8,10 +8,24 @@ CVad::CVad(const SVadConfig& cfg) : m_cfg(cfg) {
         m_cfg.frameMs = 20;
     if (m_cfg.sampleRate <= 0)
         m_cfg.sampleRate = 16000;
+    if (m_cfg.noiseFloorFactor < 1.f)
+        m_cfg.noiseFloorFactor = 1.f;
     m_frameSamples  = static_cast<size_t>(m_cfg.sampleRate) * m_cfg.frameMs / 1000;
     if (m_frameSamples == 0)
         m_frameSamples = 1;
     m_preRollFrames = std::max(0, m_cfg.preRollMs) / std::max(1, m_cfg.frameMs);
+    m_windowFrames  = std::max(1, m_cfg.noiseWindowMs) / std::max(1, m_cfg.frameMs);
+    if (m_windowFrames == 0)
+        m_windowFrames = 1;
+    // Seed the floor at the absolute-minimum threshold; it converges toward the real
+    // ambient as the rolling window fills.
+    m_noiseFloor = m_cfg.energyThreshold;
+}
+
+float CVad::currentThreshold() const {
+    if (!m_cfg.adaptive)
+        return m_cfg.energyThreshold;
+    return std::max(m_cfg.energyThreshold, m_noiseFloor * m_cfg.noiseFloorFactor);
 }
 
 static float rms(const float* x, size_t n) {
@@ -47,7 +61,26 @@ int CVad::push(const float* samples, size_t n, int64_t frameStartMonoMs, std::ve
 }
 
 void CVad::processFrame(const float* frame, int64_t frameStartMs, std::vector<SSpeechSegment>& out) {
-    const bool voiced = rms(frame, m_frameSamples) >= m_cfg.energyThreshold;
+    const float r = rms(frame, m_frameSamples);
+    m_lastRms     = r;
+
+    // Update the rolling noise-floor estimate: the low percentile of the RMS over the
+    // recent window. A low percentile follows the ambient/pauses (which are persistent)
+    // and ignores transient speech bursts, so the gate rises to meet a hot source but
+    // never gates out real speech.
+    if (m_cfg.adaptive) {
+        m_rmsWindow.push_back(r);
+        while (m_rmsWindow.size() > m_windowFrames)
+            m_rmsWindow.pop_front();
+        std::vector<float> tmp(m_rmsWindow.begin(), m_rmsWindow.end());
+        size_t             idx = static_cast<size_t>(tmp.size() * 0.2f); // 20th percentile
+        if (idx >= tmp.size())
+            idx = tmp.size() - 1;
+        std::nth_element(tmp.begin(), tmp.begin() + idx, tmp.end());
+        m_noiseFloor = tmp[idx];
+    }
+
+    const bool voiced = r >= currentThreshold();
 
     if (!m_inSpeech) {
         // Maintain the pre-roll ring while idle.

@@ -23,8 +23,15 @@ namespace {
 }
 
 std::string Control::socketPath() {
+    // Full-path override wins (both daemon + ctl honour it), so a test instance can
+    // avoid colliding with a live daemon's socket. Then a runtime-dir override, then
+    // the standard XDG_RUNTIME_DIR, then /tmp.
+    if (const char* sock = std::getenv("HYPXRVOICE_CONTROL_SOCK"); sock && *sock)
+        return sock;
     std::string dir;
-    if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg)
+    if (const char* rt = std::getenv("HYPXRVOICE_RUNTIME_DIR"); rt && *rt)
+        dir = rt;
+    else if (const char* xdg = std::getenv("XDG_RUNTIME_DIR"); xdg && *xdg)
         dir = xdg;
     else
         dir = "/tmp";
