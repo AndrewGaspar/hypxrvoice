@@ -188,8 +188,12 @@ find_program(DBUS_RUN_SESSION dbus-run-session)
 if(DBUS_RUN_SESSION)
     add_test(NAME hypxrvoice_hud_dbus_tests
              COMMAND ${DBUS_RUN_SESSION} -- $<TARGET_FILE:hypxrvoice_hud_dbus_tests>)
+    # XDG_DATA_DIRS points nowhere so the private dbus-daemon can't see the INSTALLED
+    # hypxrhud activation file (/usr/local/share/dbus-1/services) and bus-activate a
+    # competing system daemon that races HYPXRHUD_BIN for the name (observed as a
+    # timeout once hypxrhud was installed system-wide; same fix as hypxrhud's own tests).
     set_tests_properties(hypxrvoice_hud_dbus_tests PROPERTIES
-        ENVIRONMENT "HYPXRHUD_BIN=${HYPXRHUD_BIN};HYPXRVOICE_HUD_DBUS_TEST_OK=1"
+        ENVIRONMENT "HYPXRHUD_BIN=${HYPXRHUD_BIN};HYPXRVOICE_HUD_DBUS_TEST_OK=1;XDG_DATA_DIRS=${CMAKE_CURRENT_BINARY_DIR}/no-xdg-data"
         TIMEOUT 60)
 else()
     add_test(NAME hypxrvoice_hud_dbus_tests
