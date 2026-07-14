@@ -6,16 +6,12 @@
 #include "Executor.hpp"
 #include "Feedback.hpp"
 #include "GazeResolver.hpp"
-#include "HudModel.hpp"
-#include "HudText.hpp"
 #include "IntentPipeline.hpp"
 #include "Log.hpp"
 #include "Pipeline.hpp"
-#include "PngWrite.hpp"
 #include "Vad.hpp"
 #include "Wav.hpp"
 
-#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstdio>
@@ -39,8 +35,6 @@ static void printUsage(const char* argv0) {
                  "                      intent tier + executor (honours executor.dry_run).\n"
                  "  --intent-text <s>   Debug: run the intent tier + executor on the given\n"
                  "                      utterance text (no audio) and exit.\n"
-                 "  --hud-preview <png> Debug: render the in-headset HUD (listening, parsed\n"
-                 "                      action, clarify) to a PNG and exit — no XR/headset.\n"
                  "  --model <path>      Override asr.model (whisper ggml model path).\n"
                  "  --verbose           Enable DEBUG logging.\n"
                  "  -h, --help          Show this help.\n"
@@ -166,67 +160,15 @@ static int runIntentText(const std::string& text, const SConfig& cfg) {
     return r.action.actionable() ? 0 : 3;
 }
 
-// Debug/evidence: render the three representative HUD states (live transcript, parsed
-// action with confidence + approximated marker, clarify with candidates) into one PNG,
-// so the in-headset HUD is reviewable without a headset. Pure — no XR, no daemon.
-static int runHudPreview(const std::string& path, const SConfig& cfg) {
-    const int texW = 768, texH = 384, gap = 14;
-
-    // (a) live transcript while listening.
-    SHudView listening = hudForListening("move the code monitor closer", cfg);
-
-    // (b) parsed action: gaze-resolved MoveDist, low-ish confidence, approximated + dry-run.
-    SAction act;
-    act.verb = EVerb::MoveDist; act.target = "XR-code"; act.deltaM = -0.25;
-    act.targetSource = ETargetSource::Deixis; act.gaze.stable = true; act.confidence = 0.78;
-    SExecPlan actPlan; actPlan.ok = true; actPlan.approximated = true;
-    actPlan.steps.push_back({{"hyprctl", "openxr", "select", "XR-code"}, "select"});
-    SHudView action = hudForAction(act, actPlan, cfg);
-
-    // (c) clarify with candidates.
-    SAction clar; clar.verb = EVerb::Clarify; clar.clarifyQuestion = "which one?";
-    clar.clarifyCandidates = {"XR-web", "XR-chat"};
-    SExecPlan clarPlan;
-    SHudView clarify = hudForAction(clar, clarPlan, cfg);
-
-    SHudView views[3] = {listening, action, clarify};
-
-    const int outW = texW;
-    const int outH = texH * 3 + gap * 2;
-    SHudImage out;
-    out.w = outW; out.h = outH;
-    out.rgba.assign(static_cast<size_t>(outW) * outH * 4, 0);
-    // Opaque neutral backdrop so the transparent panels are legible on disk.
-    for (size_t i = 0; i < out.rgba.size(); i += 4) {
-        out.rgba[i] = 20; out.rgba[i + 1] = 22; out.rgba[i + 2] = 26; out.rgba[i + 3] = 255;
-    }
-    // Composite each panel (premultiplied over the opaque backdrop).
-    for (int s = 0; s < 3; s++) {
-        SHudImage panel = renderHud(views[s], texW, texH);
-        int       y0    = s * (texH + gap);
-        for (int y = 0; y < texH; y++)
-            for (int x = 0; x < texW; x++) {
-                const uint8_t* p  = &panel.rgba[(static_cast<size_t>(y) * texW + x) * 4];
-                float          pa = p[3] / 255.f;
-                uint8_t*       d  = &out.rgba[(static_cast<size_t>(y0 + y) * outW + x) * 4];
-                for (int k = 0; k < 3; k++)
-                    d[k] = static_cast<uint8_t>(std::min(255.f, p[k] + d[k] * (1.f - pa)));
-            }
-    }
-    if (!Png::write(out, path)) {
-        Log::log(Log::ERR, "hud-preview: failed to write '{}'", path);
-        return 1;
-    }
-    Log::log(Log::INFO, "hud-preview: wrote {} ({}x{}) — listening / action / clarify", path, outW, outH);
-    return 0;
-}
+// The in-headset HUD is no longer rendered here (WP-H8): hypxrvoice pushes panels to the
+// shared `hypxrhud` daemon, which owns the OpenXR overlay + rendering. For an offline
+// review of the HUD's pixels use hypxrhud's `--preview` composite.
 
 int main(int argc, char** argv) {
     std::string configPath = defaultConfigPath();
     std::string oneshot;
     std::string modelOverride;
     std::string intentText;
-    std::string hudPreview;
     bool        oneshotIntent = false;
 
     for (int i = 1; i < argc; i++) {
@@ -249,8 +191,6 @@ int main(int argc, char** argv) {
             oneshotIntent = true;
         } else if (a == "--intent-text") {
             intentText = needVal("--intent-text");
-        } else if (a == "--hud-preview") {
-            hudPreview = needVal("--hud-preview");
         } else if (a == "--model") {
             modelOverride = needVal("--model");
         } else if (a == "--verbose") {
@@ -274,9 +214,6 @@ int main(int argc, char** argv) {
         Log::log(Log::DEBUG, "config: {}", w);
     if (!modelOverride.empty())
         cfg.asr.model = modelOverride;
-
-    if (!hudPreview.empty())
-        return runHudPreview(hudPreview, cfg);
 
     if (!intentText.empty())
         return runIntentText(intentText, cfg);

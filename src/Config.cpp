@@ -197,20 +197,17 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.feedback.notify, val);
         } else if (k == "feedback.hud") {
             setBool(out.feedback.hud, val);
-        } else if (k == "feedback.hud_pose") {
-            setStr(out.feedback.hudPose, val);
-        } else if (k == "feedback.hud_size") {
-            setFloat(out.feedback.hudSize, val);
-        } else if (k == "feedback.hud_opacity") {
-            setFloat(out.feedback.hudOpacity, val);
-        } else if (k == "feedback.hud_hold_ms") {
-            setInt(out.feedback.hudHoldMs, val);
-        } else if (k == "feedback.hud_fade_ms") {
-            setInt(out.feedback.hudFadeMs, val);
-        } else if (k == "feedback.hud_z") {
-            setInt(out.feedback.hudZ, val);
-        } else if (k == "feedback.hud_gpu") {
-            setStr(out.feedback.hudGpu, val);
+        } else if (k == "feedback.hud_slot") {
+            setStr(out.feedback.hudSlot, val);
+        } else if (k == "feedback.hud_pose" || k == "feedback.hud_size" ||
+                   k == "feedback.hud_opacity" || k == "feedback.hud_hold_ms" ||
+                   k == "feedback.hud_fade_ms" || k == "feedback.hud_z" ||
+                   k == "feedback.hud_gpu") {
+            // WP-H8: the HUD render/geometry now lives in the shared hypxrhud daemon.
+            // These keys moved to hypxrhud's config (pose/size/space -> [slot.<name>],
+            // opacity/blend/z/gpu + the rise/hold/fade envelope -> [hud]). Accepted and
+            // ignored here so old configs still load; set them in hypxrhud.toml instead.
+            warn("'" + k + "' moved to hypxrhud config (~/.config/hypxrhud/hypxrhud.toml); ignored");
         } else if (k == "feedback.tts") {
             std::string v;
             if (!setStr(v, val)) continue;

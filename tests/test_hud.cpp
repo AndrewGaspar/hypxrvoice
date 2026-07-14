@@ -1,10 +1,15 @@
 #include "doctest.h"
 
-#include "HudMessage.hpp"
+#include "HudClient.hpp"
 #include "HudModel.hpp"
-#include "HudText.hpp"
 
 #include <string>
+
+// WP-H8: rasterisation, the fade-opacity envelope, and the HUD IPC wire format moved to
+// the shared hypxrhud daemon; hypxrvoice is a pure D-Bus client. These tests cover what
+// hypxrvoice still owns: the pure SHudView builders (phrasing, colour roles, layout) and
+// the SHudView -> hypxrhud panel-props mapping (HudClient::hudPropsFromView). The
+// create/update/dismiss round-trip against the real daemon lives in test_hud_dbus.cpp.
 
 namespace {
     // Does the view contain a line whose text equals `t`?
@@ -20,7 +25,15 @@ namespace {
                 return true;
         return false;
     }
+    bool propsHasLine(const SHudProps& p, const std::string& t) {
+        for (auto& l : p.lines)
+            if (l.text == t)
+                return true;
+        return false;
+    }
 }
+
+// ---- pure view builders ---------------------------------------------------------------
 
 TEST_CASE("hud: action phrase is terse and verb-appropriate") {
     SAction a;
@@ -46,7 +59,7 @@ TEST_CASE("hud: listening panel persists (no auto-fade) and shows partial text")
     SConfig cfg;
     SHudView v = hudForListening("open the browser", cfg);
     CHECK(v.state == EHudState::Listening);
-    CHECK(v.holdMs < 0); // persistent until replaced
+    CHECK(v.holdMs < 0); // persistent until replaced (daemon treats hold<0 as persistent)
     REQUIRE(v.lines.size() >= 2);
     CHECK(v.lines.front().big);
     CHECK(hasLine(v, "open the browser"));
@@ -65,6 +78,7 @@ TEST_CASE("hud: actionable command builds an Action panel with title + confidenc
     CHECK(v.confidence == doctest::Approx(0.82f));
     CHECK(v.dryRun);
     CHECK(hasLine(v, "dry-run"));
+    CHECK(v.holdMs == 2600); // transient dwell default (forwarded as a hold_ms prop)
 }
 
 TEST_CASE("hud: gaze deixis surfaces a provenance hint") {
@@ -91,6 +105,7 @@ TEST_CASE("hud: clarify builds a question + candidate list") {
     CHECK(v.lines.front().text == "which one?");
     CHECK(hasLine(v, "• XR-web"));
     CHECK(hasLine(v, "• XR-chat"));
+    CHECK(v.holdMs >= 3500); // a question gets a longer dwell
 }
 
 TEST_CASE("hud: a refused plan becomes an Error panel carrying the reason") {
@@ -120,95 +135,61 @@ TEST_CASE("hud: none verb yields a hidden panel") {
     CHECK(v.state == EHudState::Hidden);
 }
 
-TEST_CASE("hud: fade envelope rises, holds, and falls to zero") {
-    SHudView v;
-    v.state = EHudState::Action;
-    v.riseMs = 100; v.holdMs = 1000; v.fadeMs = 200; v.opacityCeil = 0.9f;
+// ---- view -> hypxrhud panel-props mapping ---------------------------------------------
 
-    CHECK(hudOpacity(v, 0) == doctest::Approx(0.f));
-    CHECK(hudOpacity(v, 50) == doctest::Approx(0.45f));       // mid-rise
-    CHECK(hudOpacity(v, 100) == doctest::Approx(0.9f));       // top of rise
-    CHECK(hudOpacity(v, 600) == doctest::Approx(0.9f));       // hold plateau
-    CHECK(hudOpacity(v, 1100) == doctest::Approx(0.9f));      // end of hold
-    CHECK(hudOpacity(v, 1200) == doctest::Approx(0.45f));     // mid-fade
-    CHECK(hudOpacity(v, 1300) == doctest::Approx(0.f));       // fully faded
-    CHECK(hudOpacity(v, 99999) == doctest::Approx(0.f));
+TEST_CASE("hud props: colour roles match hypxrhud's EColor order") {
+    // Locked to hypxrhud EColor: 0 Normal, 1 Dim, 2 Accent, 3 Good, 4 Warn, 5 Bad.
+    CHECK(hudColorRole(EHudColor::Normal) == 0u);
+    CHECK(hudColorRole(EHudColor::Dim)    == 1u);
+    CHECK(hudColorRole(EHudColor::Accent) == 2u);
+    CHECK(hudColorRole(EHudColor::Good)   == 3u);
+    CHECK(hudColorRole(EHudColor::Warn)   == 4u);
+    CHECK(hudColorRole(EHudColor::Bad)    == 5u);
 }
 
-TEST_CASE("hud: listening panel never auto-fades") {
-    SHudView v;
-    v.state = EHudState::Listening;
-    v.riseMs = 100; v.holdMs = -1; v.opacityCeil = 0.9f;
-    CHECK(hudOpacity(v, 100) == doctest::Approx(0.9f));
-    CHECK(hudOpacity(v, 100000) == doctest::Approx(0.9f)); // stays until replaced
+TEST_CASE("hud props: urgency escalates for clarify/error over routine panels") {
+    CHECK(hudUrgencyForState(EHudState::Listening) == 1u);
+    CHECK(hudUrgencyForState(EHudState::Action)    == 2u);
+    CHECK(hudUrgencyForState(EHudState::Clarify)   > hudUrgencyForState(EHudState::Action));
+    CHECK(hudUrgencyForState(EHudState::Error)     > hudUrgencyForState(EHudState::Action));
 }
 
-TEST_CASE("hud: hidden view is fully transparent") {
-    SHudView v; v.state = EHudState::Hidden;
-    CHECK(hudOpacity(v, 50) == doctest::Approx(0.f));
-}
-
-TEST_CASE("hud message: round-trips a full view exactly") {
-    SHudView v;
-    v.state = EHudState::Action;
-    v.lines = {{"anchoring XR-code", EHudColor::Accent, true},
-               {"dry-run", EHudColor::Dim, false},
-               {"say “hey hypr”", EHudColor::Normal, false}}; // non-ASCII survives
-    v.confidence = 0.73f; v.approximated = true; v.dryRun = true;
-    v.riseMs = 111; v.holdMs = 2222; v.fadeMs = 333; v.opacityCeil = 0.88f;
-
-    std::string wire = HudMsg::serialize(v);
-    CHECK(wire.back() == '\n');
-
-    SHudView r;
-    REQUIRE(HudMsg::parse(wire, r));
-    CHECK(r.state == v.state);
-    REQUIRE(r.lines.size() == v.lines.size());
-    for (size_t i = 0; i < v.lines.size(); i++) {
-        CHECK(r.lines[i].text == v.lines[i].text);
-        CHECK(r.lines[i].color == v.lines[i].color);
-        CHECK(r.lines[i].big == v.lines[i].big);
-    }
-    CHECK(r.confidence == doctest::Approx(v.confidence));
-    CHECK(r.approximated == v.approximated);
-    CHECK(r.dryRun == v.dryRun);
-    CHECK(r.riseMs == v.riseMs);
-    CHECK(r.holdMs == v.holdMs);
-    CHECK(r.fadeMs == v.fadeMs);
-    CHECK(r.opacityCeil == doctest::Approx(v.opacityCeil));
-}
-
-TEST_CASE("hud message: malformed input is rejected, not crashed") {
-    SHudView r;
-    CHECK_FALSE(HudMsg::parse("not json", r));
-    CHECK_FALSE(HudMsg::parse("[1,2,3]", r)); // array, not object
-    CHECK(HudMsg::parse("{}", r));            // empty object => defaults, still valid
-    CHECK(r.state == EHudState::Hidden);
-}
-
-TEST_CASE("hud render: hidden view produces a fully transparent image of the right size") {
-    SHudView v; v.state = EHudState::Hidden;
-    SHudImage img = renderHud(v, 256, 128);
-    CHECK(img.w == 256);
-    CHECK(img.h == 128);
-    REQUIRE(img.rgba.size() == 256u * 128u * 4u);
-    uint32_t alphaSum = 0;
-    for (size_t i = 3; i < img.rgba.size(); i += 4)
-        alphaSum += img.rgba[i];
-    CHECK(alphaSum == 0u);
-}
-
-TEST_CASE("hud render: an action panel draws visible (non-transparent) pixels") {
+TEST_CASE("hud props: listening view maps to a persistent voice text panel") {
     SConfig cfg;
-    SAction a; a.verb = EVerb::Anchor; a.target = "XR-code"; a.confidence = 0.8;
+    SHudView v = hudForListening("open the browser", cfg);
+    SHudProps p = hudPropsFromView(v, "voice");
+
+    CHECK(p.slot == "voice");
+    CHECK(p.kind == "text");
+    CHECK(p.urgency == 1u);
+    CHECK(p.holdMs < 0);                 // persistent — hold_ms<0 keeps it up
+    CHECK(propsHasLine(p, "open the browser"));
+    // The title line survives with its big flag + accent role.
+    REQUIRE(!p.lines.empty());
+    CHECK(p.lines.front().big);
+    CHECK(hudColorRole(p.lines.front().color) == 2u); // accent
+}
+
+TEST_CASE("hud props: action view maps confidence + transient envelope + urgency") {
+    SConfig cfg;
+    SAction a; a.verb = EVerb::Anchor; a.target = "XR-code"; a.confidence = 0.82;
+    a.targetSource = ETargetSource::Named;
     SExecPlan plan; plan.ok = true;
     SHudView v = hudForAction(a, plan, cfg);
+    SHudProps p = hudPropsFromView(v, "voice");
 
-    SHudImage img = renderHud(v, 768, 384);
-    REQUIRE(!img.empty());
-    uint32_t opaqueish = 0;
-    for (size_t i = 3; i < img.rgba.size(); i += 4)
-        if (img.rgba[i] > 40)
-            opaqueish++;
-    CHECK(opaqueish > 500u); // the panel + glyphs cover a meaningful area
+    CHECK(p.urgency == 2u);
+    CHECK(p.confidence == doctest::Approx(0.82f)); // >=0 => a confidence prop is emitted
+    CHECK(p.holdMs == 2600);                       // transient dwell forwarded
+    CHECK(p.fadeMs == 450);
+    CHECK(propsHasLine(p, "anchoring XR-code"));
+}
+
+TEST_CASE("hud props: the configured slot override rides through to the props") {
+    SConfig cfg;
+    SHudView v = hudForListening("", cfg);
+    SHudProps p = hudPropsFromView(v, "keys");
+    CHECK(p.slot == "keys");
+    // Empty slot falls back to the voice default (never an empty slot string).
+    CHECK(hudPropsFromView(v, "").slot == "voice");
 }

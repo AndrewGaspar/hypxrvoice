@@ -51,24 +51,26 @@ translate = false
 stdout_json = true      # print each transcript as a JSON line on stdout
 notify = true           # notify-send toast (fallback when the HUD isn't showing it)
 
-# ---- WP-V5: in-headset HUD (head-locked OpenXR overlay quad) ----
-# Rendered by a separate `hypxrvoice-hud` subprocess the daemon spawns on demand. It
-# shows the live transcript while listening and the parsed action (target, verb,
-# confidence, clarify candidates) as your VETO window before/as it executes. Degrades
-# cleanly to notify-send when there is no XR runtime / headset. Requires the daemon to
-# have been built with OpenXR (openxr/egl/gbm present at build time).
+# ---- in-headset HUD (WP-H8: a D-Bus client of the shared hypxrhud daemon) ----
+# hypxrvoice no longer renders the HUD itself. It pushes a panel to the shared `hypxrhud`
+# daemon (io.github.andrewgaspar.hypxrhud1), which owns the OpenXR overlay, the rendering,
+# the geometry, and the fades for the whole HypXRland ecosystem. It shows the live
+# transcript while listening and the parsed action (target, verb, confidence, clarify
+# candidates) as your VETO window before/as it executes. Degrades cleanly to notify-send
+# when hypxrhud is absent or its RuntimeState is not "live" (no headset/runtime donned).
+# Install + enable hypxrhud for the HUD to appear (or rely on its D-Bus bus activation).
 hud = true
-hud_pose = "0,-0.25,-1.0"   # VIEW-space centre (x right, y up, z fwd-negative), metres
-hud_size = 0.42             # quad width in metres (height follows the texture aspect)
-hud_opacity = 0.92          # peak layer opacity (0..1)
-hud_hold_ms = 2600          # how long the action panel holds before it fades
-hud_fade_ms = 450           # fade-out duration
-# Overlay stacking order (sessionLayersPlacement). MUST differ from HypXRland's
-# openxr:overlay_z; higher = on top. Default 20 sits above the monitors.
-hud_z = 20
-# DRM render node — MUST match the XR runtime's GPU on a multi-GPU box (e.g. the
-# NVIDIA node when WiVRn runs there). Empty = auto-scan the first working node.
-hud_gpu = ""
+hud_slot = "voice"          # which hypxrhud slot the voice panel targets
+
+# MOVED to hypxrhud config (~/.config/hypxrhud/hypxrhud.toml) — these are no longer
+# hypxrvoice's concern. Set them THERE instead:
+#   hud_pose / hud_size   -> [slot.voice]  pose = "x,y,z", size = <metres>
+#   hud_opacity           -> [hud]  opacity
+#   hud_hold_ms/hud_fade_ms (+ rise) -> [hud]  hold_ms / fade_ms / rise_ms envelope
+#   hud_z                 -> [hud]  z   (overlay stacking; keep distinct from HypXRland's
+#                                       openxr:overlay_z)
+#   hud_gpu               -> [hud]  gpu (DRM render node; match the XR runtime's GPU)
+# Any leftover feedback.hud_* keys here still load — they log a one-line "moved" warning.
 
 # ---- WP-V5: terse TTS (spoken confirmations) ----
 # Confirms what you can't see on the HUD. "off" | "errors" (refusals + clarify) |

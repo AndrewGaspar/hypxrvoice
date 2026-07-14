@@ -5,6 +5,8 @@
 #include "Executor.hpp"
 #include "Transcript.hpp"
 
+#include <functional>
+
 // V2 feedback tier: transcripts go to stdout (JSON line) + the log, and optionally a
 // notify-send toast. The richer feedback tier (in-headset HUD + piper TTS) is later
 // work (WP-V5); the seam is this single sink.
@@ -33,4 +35,9 @@ namespace Feedback {
     // HUD listening panel: show on mic open, hide on close without a command.
     void onListeningStart(const SConfig& cfg);
     void onListeningStop(const SConfig& cfg);
+
+    // TEST-ONLY seam: redirect the notify-send fallback to a sink so the degraded path
+    // (HUD daemon unreachable) is assertable without spawning notify-send. Passing nullptr
+    // restores the real notify-send behaviour.
+    void _setNotifySinkForTest(std::function<void(const std::string&, const std::string&)> sink);
 }

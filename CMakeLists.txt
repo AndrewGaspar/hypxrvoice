@@ -11,10 +11,14 @@ endif()
 
 # ---- system dependencies (found via pkg-config; see README "Requirements") ----
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(pipewire REQUIRED IMPORTED_TARGET libpipewire-0.3)
-pkg_check_modules(spa      REQUIRED IMPORTED_TARGET libspa-0.2)
-pkg_check_modules(sndfile  REQUIRED IMPORTED_TARGET sndfile)
-pkg_check_modules(jansson  REQUIRED IMPORTED_TARGET jansson)
+pkg_check_modules(pipewire   REQUIRED IMPORTED_TARGET libpipewire-0.3)
+pkg_check_modules(spa        REQUIRED IMPORTED_TARGET libspa-0.2)
+pkg_check_modules(sndfile    REQUIRED IMPORTED_TARGET sndfile)
+pkg_check_modules(jansson    REQUIRED IMPORTED_TARGET jansson)
+# libsystemd: the sd-bus client of the shared hypxrhud HUD daemon (WP-H8). Present on
+# every systemd box. hypxrvoice links NO OpenXR/EGL/GBM/stb — the HUD render core moved
+# to hypxrhud and hypxrvoice reaches it over D-Bus only.
+pkg_check_modules(libsystemd REQUIRED IMPORTED_TARGET libsystemd)
 
 # ---- vendored whisper.cpp (subprojects/, pinned shallow submodule) ----
 # whisper.cpp declares cmake_minimum_required(3.5); CMake 4 needs this shim to
@@ -47,54 +51,14 @@ else()
     message(STATUS "hypxrvoice: local-LLM intent backend disabled (rule backend only)")
 endif()
 
-# ---- WP-V5: optional OpenXR HUD overlay subprocess deps ----
-# The in-headset HUD is rendered by a separate `hypxrvoice-hud` process (like the
-# hypxrpaper sibling): single-threaded OpenXR + EGL/GBM. When these libs are absent the
-# subprocess is simply not built and the daemon degrades to notify-send at runtime.
-set(HAVE_XR FALSE)
-pkg_check_modules(xrdeps IMPORTED_TARGET openxr egl glesv2 gbm libdrm)
-if(xrdeps_FOUND)
-    set(HAVE_XR TRUE)
-    message(STATUS "hypxrvoice: in-headset HUD overlay ENABLED (openxr/egl/gbm found)")
-else()
-    message(STATUS "hypxrvoice: HUD overlay subprocess disabled (openxr/egl/gbm not found) — notify-send fallback")
-endif()
-
-# ---- bundled OFL font, baked into the binary (font_data.c) ----
-set(HUD_FONT_TTF ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/LiberationMono-Regular.ttf)
-set(HUD_FONT_C   ${CMAKE_CURRENT_BINARY_DIR}/font_data.c)
-add_custom_command(
-    OUTPUT ${HUD_FONT_C}
-    COMMAND ${CMAKE_COMMAND} -DFONT_IN=${HUD_FONT_TTF} -DOUT_C=${HUD_FONT_C}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
-    DEPENDS ${HUD_FONT_TTF} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_font.cmake
-    COMMENT "Embedding HUD font (LiberationMono, OFL)"
-    VERBATIM)
-
-# ---- hud_core: the light, pure feedback library (NO whisper/pipewire/XR) ----
-# Shared by the daemon (via hypxrvoice_core) AND the hypxrvoice-hud subprocess, so the
-# HUD renderer never pulls in the heavy ASR/audio stack. Depends only on jansson (wire
-# format) + the vendored stb headers + the bundled font.
-add_library(hypxrvoice_hud_core STATIC
-    src/Log.cpp
-    src/HudModel.cpp
-    src/HudText.cpp
-    src/HudMessage.cpp
-    src/PngWrite.cpp
-    src/Tts.cpp
-    src/stb_impl.cpp
-    ${HUD_FONT_C}
-)
-target_include_directories(hypxrvoice_hud_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
-target_link_libraries(hypxrvoice_hud_core PUBLIC PkgConfig::jansson)
-target_compile_options(hypxrvoice_hud_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
-# The stb single-header impls have their own upstream warning style.
-set_source_files_properties(src/stb_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
-
 # ---- core library (shared by the daemon and the tests) ----
+# WP-H8: the feedback tier is a pure D-Bus client (HudClient) of hypxrhud. The former
+# HUD render core (HudText/HudMessage/PngWrite/stb + the bundled font + the
+# hypxrvoice-hud OpenXR subprocess) is gone — it lives in hypxrhud now. The pure view
+# model (HudModel) + phrase helper + terse TTS (Tts) stay; HudClient maps a view onto the
+# daemon's a{sv} panel props over sd-bus.
 add_library(hypxrvoice_core STATIC
+    src/Log.cpp
     src/Config.cpp
     src/Transcript.cpp
     src/ActivationMachine.cpp
@@ -106,7 +70,9 @@ add_library(hypxrvoice_core STATIC
     src/AudioCapture.cpp
     src/ControlSocket.cpp
     src/Feedback.cpp
-    src/HudOverlay.cpp
+    src/HudModel.cpp
+    src/HudClient.cpp
+    src/Tts.cpp
     src/Pipeline.cpp
     src/Command.cpp
     src/DesktopContext.cpp
@@ -120,12 +86,12 @@ add_library(hypxrvoice_core STATIC
 )
 target_include_directories(hypxrvoice_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(hypxrvoice_core PUBLIC
-    hypxrvoice_hud_core
     whisper
     PkgConfig::pipewire
     PkgConfig::spa
     PkgConfig::sndfile
     PkgConfig::jansson
+    PkgConfig::libsystemd
 )
 target_compile_options(hypxrvoice_core PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
 
@@ -150,18 +116,6 @@ target_include_directories(hypxrvoicectl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 target_compile_options(hypxrvoicectl PRIVATE -Wall -Wextra)
 
 install(TARGETS hypxrvoiced hypxrvoicectl RUNTIME DESTINATION bin)
-
-# ---- WP-V5: hypxrvoice-hud overlay subprocess (only when XR deps are present) ----
-if(HAVE_XR)
-    add_executable(hypxrvoice-hud
-        src/hud/hud_main.cpp
-        src/hud/HudSession.cpp
-        src/hud/Egl.cpp
-    )
-    target_link_libraries(hypxrvoice-hud PRIVATE hypxrvoice_hud_core PkgConfig::xrdeps)
-    target_compile_options(hypxrvoice-hud PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
-    install(TARGETS hypxrvoice-hud RUNTIME DESTINATION bin)
-endif()
 
 # ---- tests ----
 enable_testing()
@@ -192,3 +146,32 @@ target_compile_definitions(hypxrvoice_tests PRIVATE
     HYPXRVOICE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
 )
 add_test(NAME hypxrvoice_tests COMMAND hypxrvoice_tests)
+
+# ---- WP-H8: D-Bus integration test against the REAL hypxrhud daemon ----
+# Spawns the actual hypxrhud binary (--no-xr) on a PRIVATE session bus (dbus-run-session)
+# and drives it through CHudClient: a listening->update->dismiss round-trip asserted via
+# the daemon's PanelCount, plus the daemon-absent -> notify-send fallback (mocked sink).
+# NEVER touches the user's real session bus. Skips cleanly when the hypxrhud binary or
+# dbus-run-session is unavailable.
+add_executable(hypxrvoice_hud_dbus_tests tests/test_hud_dbus.cpp)
+target_include_directories(hypxrvoice_hud_dbus_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+target_link_libraries(hypxrvoice_hud_dbus_tests PRIVATE hypxrvoice_core)
+target_compile_options(hypxrvoice_hud_dbus_tests PRIVATE -Wall -Wextra)
+
+# Locate the sibling hypxrhud daemon binary (override with -DHYPXRHUD_BIN=... or the
+# HYPXRHUD_BIN env at test time). Default: the sibling repo's build tree.
+set(HYPXRHUD_BIN "${CMAKE_CURRENT_SOURCE_DIR}/../hypxrhud/build/hypxrhud"
+    CACHE FILEPATH "Path to the built hypxrhud daemon for the D-Bus integration test")
+
+find_program(DBUS_RUN_SESSION dbus-run-session)
+if(DBUS_RUN_SESSION)
+    add_test(NAME hypxrvoice_hud_dbus_tests
+             COMMAND ${DBUS_RUN_SESSION} -- $<TARGET_FILE:hypxrvoice_hud_dbus_tests>)
+    set_tests_properties(hypxrvoice_hud_dbus_tests PROPERTIES
+        ENVIRONMENT "HYPXRHUD_BIN=${HYPXRHUD_BIN};HYPXRVOICE_HUD_DBUS_TEST_OK=1"
+        TIMEOUT 60)
+else()
+    add_test(NAME hypxrvoice_hud_dbus_tests
+             COMMAND ${CMAKE_COMMAND} -E echo "SKIP: dbus-run-session not found; HUD D-Bus integration test skipped")
+    message(STATUS "hypxrvoice: dbus-run-session not found — HUD integration test will report SKIP")
+endif()

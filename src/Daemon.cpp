@@ -57,8 +57,8 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
 
     loadIntentBackend();
 
-    // WP-V5 feedback runtime: in-headset HUD (spawns the hypxrvoice-hud overlay
-    // subprocess lazily) + terse TTS. Daemon-only — degrades to notify-send.
+    // WP-H8 feedback runtime: in-headset HUD as a D-Bus client of the shared hypxrhud
+    // daemon + terse TTS. Daemon-only — degrades to notify-send when hypxrhud is absent.
     Feedback::startRuntime(m_cfg);
 
     m_eventFd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -217,7 +217,7 @@ void CDaemon::tick() {
         }
     }
     applyMicPolicy();
-    Feedback::pollRuntime(); // reap the HUD subprocess if it exited; degrade once.
+    Feedback::pollRuntime(); // drain the hypxrhud bus fd (runtime/ownership signals).
 
     if (m_machine.state() != m_lastState) {
         Log::log(Log::DEBUG, "state {} -> {}", stateName(m_lastState), stateName(m_machine.state()));
@@ -310,8 +310,8 @@ std::string CDaemon::doReload() {
     if (m_cfg.intent.backend != oldBackend || m_cfg.intent.model != oldIntentModel ||
         m_cfg.intent.enabled != oldIntentEnabled)
         loadIntentBackend();
-    // Re-apply feedback config (TTS mode, HUD enable). Geometry/pose changes take
-    // effect when the overlay subprocess is next (re)spawned — see README.
+    // Re-apply feedback config (TTS mode, HUD enable/slot). HUD geometry/opacity now
+    // live in hypxrhud's own config — reload hypxrhud for those. See README.
     Feedback::startRuntime(m_cfg);
     applyMicPolicy();
     return note;

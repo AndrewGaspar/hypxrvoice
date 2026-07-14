@@ -7,12 +7,17 @@
 #include <string>
 #include <vector>
 
-// WP-V5 feedback tier — the PURE view model for the in-headset HUD. Nothing here
-// touches OpenXR, EGL, GL, or a font: it turns the intent/executor records into a
-// small structured "what to show" description (title, coloured text lines, a
-// confidence bar, an approximated/dry-run marker) plus fade timing. The renderer
-// (HudText) rasterises it and the overlay subprocess submits it. Keeping this layer
-// pure is what makes the HUD reviewable offline (--hud-preview) and unit-testable.
+// WP-V5/WP-H8 feedback tier — the PURE view model for the in-headset HUD. Nothing
+// here touches OpenXR, EGL, GL, D-Bus, or a font: it turns the intent/executor records
+// into a small structured "what to show" description (title, coloured text lines, a
+// confidence bar, an approximated/dry-run marker) plus the fade-envelope timing.
+//
+// WP-H8: rendering + fade compositing now live in the shared `hypxrhud` daemon.
+// hypxrvoice is a pure D-Bus client (see HudClient): it maps this SHudView onto the
+// daemon's `a{sv}` panel props (HudClient::hudPropsFromView) and pushes it. The
+// envelope fields below (rise/hold/fade) are forwarded verbatim as panel props so the
+// daemon applies the same rise→hold→fade; hypxrvoice no longer computes opacity itself.
+// Keeping this layer pure is what makes the mapping unit-testable with no bus.
 
 enum class EHudState {
     Hidden,    // nothing to show.
@@ -23,8 +28,9 @@ enum class EHudState {
 };
 const char* hudStateName(EHudState s);
 
-// A semantic colour role; HudText maps each to concrete RGBA. Kept abstract so the
-// palette lives in one place and the model stays render-agnostic.
+// A semantic colour role, forwarded to hypxrhud as a small colorRole int (see
+// HudClient::hudColorRole); the daemon maps each to concrete RGBA. Kept abstract so the
+// palette lives in one place (hypxrhud) and this model stays render-agnostic.
 enum class EHudColor {
     Normal, // primary foreground.
     Dim,    // secondary / hint text.
@@ -51,20 +57,16 @@ struct SHudView {
     bool  approximated = false; // executor used a fallback for a missing capability.
     bool  dryRun       = false; // executor will actuate nothing (a badge, not an error).
 
-    // Fade envelope (renderer-clock ms). holdMs < 0 => stay until replaced/hidden
-    // (used for Listening). Rise+hold+fade for transient panels (Action/Clarify/Error).
+    // Fade envelope (hypxrhud panel props, ms). holdMs < 0 => stay until replaced/
+    // hidden (used for Listening; the daemon's envelope treats hold<0 as persistent).
+    // Rise+hold+fade for transient panels (Action/Clarify/Error). Forwarded as
+    // rise_ms/hold_ms/fade_ms props; the daemon owns the actual opacity compositing.
     int   riseMs      = 110;
     int   holdMs      = 2600;
     int   fadeMs      = 450;
-    float opacityCeil = 0.92f;
 
     bool empty() const { return state == EHudState::Hidden; }
 };
-
-// Layer opacity for a frame shown `elapsedMs` ago, following the rise/hold/fade
-// envelope. Pure — the overlay subprocess calls this every frame for a free,
-// texture-upload-free fade (color-scale-bias .a). Returns [0, opacityCeil].
-float hudOpacity(const SHudView& v, int64_t elapsedMs);
 
 // --- builders: the intent/executor records -> an SHudView. All pure. ---
 

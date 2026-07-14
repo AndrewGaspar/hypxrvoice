@@ -59,19 +59,17 @@ struct SConfig {
         bool stdoutJson = true;
         bool notify     = true; // notify-send toasts
 
-        // WP-V5 in-headset HUD (a head-locked OpenXR overlay quad). Rendered by a
-        // separate `hypxrvoice-hud` subprocess the daemon spawns; degrades to
-        // notify-send when no XR runtime / binary is available. DEFAULT OFF so unit
-        // tests and offline tools never spawn an XR client (safety: one runtime per
-        // box). examples/config.toml turns it on.
-        bool        hud        = false;
-        std::string hudPose    = "0,-0.25,-1.0"; // VIEW-space centre, metres (x,y,z).
-        float       hudSize    = 0.42f;          // quad width in metres (height from aspect).
-        float       hudOpacity = 0.92f;          // peak layer opacity (color-scale-bias .a).
-        int         hudHoldMs  = 2600;           // action panel dwell before it fades.
-        int         hudFadeMs  = 450;            // fade-out duration.
-        int         hudZ       = 20;             // overlay sessionLayersPlacement (above HypXRland's).
-        std::string hudGpu;                      // DRM render node; empty = auto (must match runtime).
+        // WP-H8 in-headset HUD. hypxrvoice is now a pure D-Bus CLIENT of the shared
+        // `hypxrhud` daemon (io.github.andrewgaspar.hypxrhud1): it pushes a panel to a
+        // named slot; hypxrhud owns the OpenXR overlay session, rendering, geometry, and
+        // fades. Degrades to notify-send when the daemon is absent or its RuntimeState is
+        // not "live". DEFAULT OFF so unit tests / offline tools never touch the bus.
+        //
+        // MIGRATED to hypxrhud config (was feedback.hud_* here): geometry (pose/size),
+        // opacity, hold/fade envelope, overlay z, and the DRM gpu are hypxrhud's
+        // [hud]/[slot.<name>] keys now — see $XDG_CONFIG_HOME/hypxrhud/hypxrhud.toml.
+        bool        hud     = false;
+        std::string hudSlot = "voice"; // hypxrhud slot the voice panel targets (config override).
 
         // WP-V5 terse TTS. Spoken confirmations for things you can't see on the HUD
         // (errors, clarify). "off" | "errors" (errors+clarify) | "all". espeak-ng

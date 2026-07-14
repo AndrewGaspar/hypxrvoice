@@ -47,9 +47,9 @@ the code leaves clean seams for them.
    └───────────────┬───────────────────────────────────────────────────────────┘
                    ▼
    feedback: stdout JSON + log + notify-send            [IMPLEMENTED]
+             + in-headset HUD (hypxrhud D-Bus client) + terse TTS  [WP-V5/H8]
                    ┊
    ─ ─ ─ ─ ─ ─ ─ ─ ┊ ─ ─ ─ ─ ─  later work packages (seams only)  ─ ─ ─ ─ ─ ─ ─ ─
-   in-headset HUD lane + piper TTS confirmations                 [WP-V5]
    cloud reasoning escalation (Claude tool-use)                  [WP-V6]
 ```
 
@@ -96,45 +96,44 @@ Two spoken interactions need compositor verbs that don't exist yet (targeted gra
 place-at-pose); the executor uses documented approximations behind capability flags and
 the precise proposed verbs live in [`docs/COMPOSITOR-GAPS.md`](docs/COMPOSITOR-GAPS.md).
 
-### Feedback tier — in-headset HUD + terse TTS (WP-V5)
+### Feedback tier — in-headset HUD + terse TTS (WP-V5, HUD migrated in WP-H8)
 
 Every recognised command flows through one sink, `Feedback::emitAction(action, plan,
 cfg)`, which drives three channels:
 
-- **In-headset HUD** — a head-locked OpenXR overlay quad showing the **live transcript**
-  while listening and the **parsed action** (verb + target, how the target resolved,
-  a confidence bar, `approx`/`dry-run` badges, or a clarify question + candidates) as your
-  **veto window** before/as it executes. It is a **separate `hypxrvoice-hud` subprocess**
-  the daemon spawns on demand — a second overlay session
-  (`XrSessionCreateInfoOverlayEXTX`, distinct `hud_z`) composited **above** HypXRland's
-  monitors, single-threaded with the EGL context held current (Monado's GL-fence contract
-  by construction, exactly like the `hypxrpaper` sibling). The daemon itself links **no**
-  OpenXR/EGL — so a box with no XR runtime still builds and runs, and the HUD degrades to
-  notify-send with a single logged note. Head-lock is a `XR_REFERENCE_SPACE_TYPE_VIEW`
-  quad (native, zero per-frame math); opacity + the idle fade are a per-frame
-  `XR_KHR_composition_layer_color_scale_bias` scalar (**no** texture re-upload for fades —
-  the panel texture is uploaded only when the text changes). Text is rasterised on the CPU
-  with vendored **stb_truetype** and a **bundled OFL font** (LiberationMono) baked into the
-  binary — no runtime font-path or system text-shaping dependency.
+- **In-headset HUD** — a head-locked panel showing the **live transcript** while listening
+  and the **parsed action** (verb + target, how the target resolved, a confidence bar,
+  `approx`/`dry-run` badges, or a clarify question + candidates) as your **veto window**
+  before/as it executes. As of **WP-H8** hypxrvoice does **not** render this itself: it is
+  a pure **D-Bus client** of the shared **[hypxrhud](../hypxrhud)** daemon
+  (`io.github.andrewgaspar.hypxrhud1`), which owns the one OpenXR overlay session, the
+  rendering, the geometry, and the fades for the whole HypXRland ecosystem. hypxrvoice maps
+  each `SHudView` onto the daemon's `a{sv}` panel props (`HudClient::hudPropsFromView`) and
+  pushes it to a named **slot** (`voice` by default):
+  `onListeningStart` → `CreatePanel({slot:"voice", …})` (keeps the returned id); each
+  per-word transcript → `UpdatePanel(id, {lines, confidence})` **fire-and-forget**
+  (`NO_REPLY_EXPECTED`); a recognised action/clarify updates the same panel; mic-close
+  without a command → `DismissPanel(id)`. The daemon is **bus-activated**, so the first
+  create starts it if its unit is installed. hypxrvoice links **no** OpenXR/EGL/GBM/stb —
+  only `sd-bus`.
 - **Terse TTS** — spoken confirmations for what you *can't* see: refusals and clarify
   questions (`tts = "errors"`, the default), optionally every action (`"all"`). Short
   phrasings ("moving XR-code", "which firefox?", "can't, no such monitor"). **No
   ONNX/piper** (the WP-V2 constraint): it shells out to the `espeak-ng` binary if on PATH,
-  else TTS is cleanly disabled. Point `audio.source` at a `pipewire-module-echo-cancel`
-  source so the assistant doesn't hear its own voice.
-- **notify-send** — the fallback when the HUD isn't carrying the message (out of headset,
-  no XR runtime, or `hud = false`).
+  else TTS is cleanly disabled. TTS is voice-owned and stays in this repo. Point
+  `audio.source` at a `pipewire-module-echo-cancel` source so the assistant doesn't hear
+  its own voice.
+- **notify-send** — the fallback when the HUD isn't carrying the message: the hypxrhud
+  daemon is **absent/unreachable**, its `RuntimeState` is not `"live"` (no headset/runtime
+  donned), or `hud = false`. hypxrvoice watches `RuntimeStateChanged` + `NameOwnerChanged`
+  to know, so it never polls; a single logged note marks the degrade.
 
-The whole view model (phrasing, colour roles, layout selection, fade envelope) is a **pure
-library** (`HudModel`/`HudText`) shared by the subprocess and an offline preview, so the
-HUD is reviewable without a headset:
+The view model + phrasing + colour roles stay a **pure library** (`HudModel`) and the
+`SHudView → props` mapping (`HudClient`) is pure and unit-tested with no bus. The HUD's
+actual pixels are hypxrhud's concern — review them there with `hypxrhud --preview`.
 
-```sh
-hypxrvoiced --hud-preview /tmp/hud.png     # renders listening / action / clarify states
-```
-
-See **[Live in-headset validation](#live-in-headset-validation-wp-v5)** for the on-headset
-checklist.
+See **[Live in-headset validation](#live-in-headset-validation-wp-v5--wp-h8)** for the
+on-headset checklist.
 
 ### Activation state machine
 
@@ -156,17 +155,16 @@ cmake --build build
 
 - `libpipewire-0.3` + `libspa-0.2` — microphone capture
 - `sndfile` — WAV/audio decode for `--oneshot`
-- `jansson` — parse `hyprctl openxr status -j` + the HUD IPC wire format
+- `jansson` — parse `hyprctl openxr status -j`
+- `libsystemd` — the **sd-bus client** of the shared **hypxrhud** HUD daemon (WP-H8). This
+  is the only new HUD dependency; hypxrvoice links **no** OpenXR/EGL/GBM/stb.
 - `libnotify` / `notify-send` at runtime — toasts (optional; silently skipped if absent)
-- **`openxr` + `egl` + `glesv2` + `gbm` + `libdrm`** (optional) — the in-headset HUD
-  overlay subprocess `hypxrvoice-hud`. When absent at build time the subprocess is simply
-  not built and the HUD degrades to notify-send at runtime (a one-time logged note).
+- **[hypxrhud](../hypxrhud)** at runtime (optional) — the in-headset HUD. Install + enable
+  its user service (`systemctl --user enable --now hypxrhud.service`, or rely on D-Bus bus
+  activation) for the HUD to appear; without it hypxrvoice degrades to notify-send. The
+  OpenXR/EGL/GBM/stb + the bundled font that used to live here now live in hypxrhud.
 - **`espeak-ng`** binary at runtime (optional) — terse TTS; cleanly disabled if not on
   PATH. No ONNX/piper runtime is used or linked.
-
-`stb_truetype` + `stb_image_write` (HUD text raster + `--hud-preview` PNG) are vendored as
-single headers in `third_party/`; the bundled HUD font `third_party/fonts/` is under the
-SIL OFL (see `LiberationMono-OFL.txt`).
 
 Vendored under `subprojects/` (pinned shallow submodules): **whisper.cpp** (ASR) and
 **llama.cpp** (the optional local-LLM intent backend). Clone with submodules, or
@@ -261,48 +259,56 @@ Pure logic (activation state machine, config parsing, VAD segmentation + timesta
 bookkeeping, wake-word matching, transcript JSON, compositor-status parsing, plus the
 WP-V4 tier — context snapshot + semantic resolution, gaze/deixis stability window,
 executor allowlist, rule-intent grammar, the full transcript→context→intent→executor
-matrix with a mocked hyprctl, the pure llama grammar/parse/prompt, plus the WP-V5 feedback
-tier — HUD view-model builders, the rise/hold/fade opacity envelope, the HUD IPC
-round-trip, the text rasteriser, and TTS phrase selection across modes) is unit tested and
-needs no model. The HUD's rendered pixels are reviewable offline via
-`hypxrvoiced --hud-preview <png>` (listening / action / clarify states). The `oneshot` case runs the real whisper pipeline over the
-bundled public-domain JFK clip and asserts per-word monotonic timestamps; it is skipped
-(passes trivially) when no model is present — set `HYPXRVOICE_TEST_MODEL` or drop a model
-in `models/` to exercise it.
+matrix with a mocked hyprctl, the pure llama grammar/parse/prompt, plus the feedback tier —
+HUD view-model builders and the pure `SHudView → hypxrhud panel-props` mapping
+(`HudClient::hudPropsFromView`, WP-H8), and TTS phrase selection across modes) is unit
+tested and needs no model. A second test binary (`hypxrvoice_hud_dbus_tests`) is a **D-Bus
+integration test**: it spawns the **real** hypxrhud daemon (`--no-xr`) on a **private**
+session bus via `dbus-run-session` and drives `CHudClient` through a listening → update →
+dismiss round-trip (asserted via the daemon's `PanelCount`/`GetCapabilities`), plus the
+daemon-absent → notify-send fallback (mocked sink). It never touches your real session bus
+and self-skips if `dbus-run-session` or the hypxrhud binary is absent (point
+`-DHYPXRHUD_BIN=…` or the `HYPXRHUD_BIN` env at it). The `oneshot` case runs the real
+whisper pipeline over the bundled public-domain JFK clip and asserts per-word monotonic
+timestamps; it is skipped (passes trivially) when no model is present — set
+`HYPXRVOICE_TEST_MODEL` or drop a model in `models/` to exercise it.
 
-## Live in-headset validation (WP-V5)
+## Live in-headset validation (WP-V5 / WP-H8)
 
-The HUD's pixels and logic are covered offline (unit tests + `--hud-preview`), but its XR
-composition is only verifiable on a headset, and **must not** run alongside another live
-XR session — there is one runtime per box. Do this as a single deliberate session:
+The HUD's logic and the props mapping are covered offline (unit tests + the D-Bus
+integration test), but the actual in-headset composition is **hypxrhud's** and is verified
+on a headset there. hypxrvoice's job is just to push the right panels. To validate the
+end-to-end path:
 
-1. **Build with XR** (this box has it): configure logs `in-headset HUD overlay ENABLED`;
-   confirm `build/hypxrvoice-hud` exists.
-2. **Pick the GPU.** On a multi-GPU box set `feedback.hud_gpu` to the **same** DRM render
-   node the XR runtime uses (e.g. the NVIDIA node for WiVRn) — a mismatch fails EGL/alloc.
-3. **Distinct z.** Ensure `feedback.hud_z` differs from HypXRland's `openxr:overlay_z`
-   (default 20 sits above the monitors). Equal values sort indeterminately.
-4. **Standalone smoke test** (no daemon): with your runtime up and the headset connected,
-   `build/hypxrvoice-hud --self-test --gpu <node>` then `echo '{"state":"action","lines":
-   [{"t":"hello","c":"accent","big":true}]}' | build/hypxrvoice-hud --gpu <node>` — the
-   panel should appear head-locked. It exits code **3** (clean) when no runtime is found.
-5. **Full path:** run `hypxrvoiced` with `hud = true`, PTT a command, and check:
+1. **Install + run hypxrhud.** Build the sibling [hypxrhud](../hypxrhud), install its D-Bus
+   activation + user unit, and either `systemctl --user enable --now hypxrhud.service` or
+   let the first `CreatePanel` bus-activate it. Its own config
+   (`~/.config/hypxrhud/hypxrhud.toml`) owns the HUD **geometry, GPU, overlay z, opacity,
+   and the rise/hold/fade envelope** — the keys that used to be `feedback.hud_*` here.
+   Point the `voice` slot pose/size there; ensure its overlay `z` differs from HypXRland's
+   `openxr:overlay_z`. There is one XR runtime per box, so this runs alongside HypXRland,
+   not a second session.
+2. **Enable the HUD in hypxrvoice.** Set `feedback.hud = true` (and, if you re-slot it,
+   `feedback.hud_slot`). `hud`/`hud_slot`/`tts*` apply on `reload`.
+3. **Full path:** run `hypxrvoiced`, PTT a command, and check in-headset:
    - the **listening** panel appears on PTT and shows the partial transcript;
    - the **action** panel replaces it with the verb+target, a confidence bar, and the
-     `approx`/`dry-run` badges, then **fades** after `hud_hold_ms + hud_fade_ms`;
-   - a **clarify** utterance ("open firefox" with two firefoxes) shows the candidate list;
-   - the panel is **legible and comfortable** — tune `hud_pose` (down/further for less
-     "stuck to your eyeballs"), `hud_size`, `hud_opacity`.
-6. **TTS:** install `espeak-ng`; with `tts = "errors"` a refusal speaks "can't, …" and a
+     `approx`/`dry-run` badges, then **fades** (hypxrhud applies the envelope hypxrvoice
+     forwards as `hold_ms`/`fade_ms` props);
+   - a **clarify** utterance ("open firefox" with two firefoxes) shows the candidate list.
+   Tune legibility/comfort (pose/size/opacity) in **hypxrhud's** config.
+4. **TTS:** install `espeak-ng`; with `tts = "errors"` a refusal speaks "can't, …" and a
    clarify speaks the question; `tts = "all"` also confirms successes. Point
    `audio.source` at an echo-cancel source so it doesn't re-trigger on its own voice.
-7. **Degradation:** kill the runtime (or unset it) and confirm the daemon logs *HUD
-   overlay unavailable … using notifications only* once and falls back to `notify-send`.
+5. **Degradation:** stop hypxrhud (or undon the headset so its `RuntimeState` leaves
+   `"live"`) and confirm hypxrvoice logs *HUD daemon unavailable … using notifications
+   only* once and falls back to `notify-send`, then recovers when hypxrhud returns (it
+   watches `NameOwnerChanged` + `RuntimeStateChanged`).
 
-**Config keys to tune:** `hud_pose`, `hud_size`, `hud_opacity`, `hud_hold_ms`,
-`hud_fade_ms`, `hud_z`, `hud_gpu`; `tts` (off/errors/all), `tts_voice`, `tts_rate`.
-Geometry keys apply when the overlay subprocess is next spawned (restart the daemon after
-changing them); `tts`/`hud` enable apply on `reload`.
+**hypxrvoice config keys:** `hud` (on/off), `hud_slot` (default `voice`); `tts`
+(off/errors/all), `tts_voice`, `tts_rate`. **Moved to hypxrhud config:** `hud_pose`,
+`hud_size`, `hud_opacity`, `hud_hold_ms`, `hud_fade_ms`, `hud_z`, `hud_gpu` (still accepted
+in `config.toml` with a one-line "moved" warning so old configs keep loading).
 
 ## What is NOT here (later work packages)
 

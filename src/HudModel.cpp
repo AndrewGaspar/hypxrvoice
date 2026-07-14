@@ -13,29 +13,6 @@ const char* hudStateName(EHudState s) {
     return "?";
 }
 
-float hudOpacity(const SHudView& v, int64_t elapsedMs) {
-    if (v.state == EHudState::Hidden)
-        return 0.f;
-    const float ceil = std::clamp(v.opacityCeil, 0.f, 1.f);
-    if (elapsedMs < 0)
-        return 0.f;
-    // Rise.
-    if (v.riseMs > 0 && elapsedMs < v.riseMs)
-        return ceil * (static_cast<float>(elapsedMs) / v.riseMs);
-    const int64_t afterRise = elapsedMs - std::max(0, v.riseMs);
-    // Persistent panel (listening): no auto-fade.
-    if (v.holdMs < 0)
-        return ceil;
-    if (afterRise < v.holdMs)
-        return ceil;
-    const int64_t intoFade = afterRise - v.holdMs;
-    if (v.fadeMs <= 0)
-        return 0.f;
-    if (intoFade < v.fadeMs)
-        return ceil * (1.f - static_cast<float>(intoFade) / v.fadeMs);
-    return 0.f;
-}
-
 // Present-participle phrase for the acted verb, e.g. "moving", "docking".
 static const char* verbGerund(EVerb v) {
     switch (v) {
@@ -101,10 +78,10 @@ static std::string sourceHint(const SAction& a) {
 }
 
 SHudView hudForListening(const std::string& partial, const SConfig& cfg) {
+    (void)cfg;
     SHudView v;
-    v.state       = EHudState::Listening;
-    v.holdMs      = -1; // persist until replaced / hidden.
-    v.opacityCeil = cfg.feedback.hudOpacity;
+    v.state  = EHudState::Listening;
+    v.holdMs = -1; // persist until replaced / hidden (daemon treats hold<0 as persistent).
     v.lines.push_back({partial.empty() ? "listening…" : "listening", EHudColor::Accent, true});
     if (!partial.empty())
         v.lines.push_back({partial, EHudColor::Normal, false});
@@ -112,10 +89,9 @@ SHudView hudForListening(const std::string& partial, const SConfig& cfg) {
 }
 
 SHudView hudForAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg) {
+    // Envelope defaults come from SHudView (rise 110 / hold 2600 / fade 450) and are
+    // forwarded to hypxrhud as panel props; geometry + opacity are the daemon's config.
     SHudView v;
-    v.opacityCeil  = cfg.feedback.hudOpacity;
-    v.holdMs       = cfg.feedback.hudHoldMs;
-    v.fadeMs       = cfg.feedback.hudFadeMs;
     v.dryRun       = cfg.executor.dryRun;
     v.approximated = plan.approximated;
 
@@ -126,7 +102,7 @@ SHudView hudForAction(const SAction& a, const SExecPlan& plan, const SConfig& cf
 
     if (a.verb == EVerb::Clarify) {
         v.state = EHudState::Clarify;
-        v.holdMs = std::max(cfg.feedback.hudHoldMs, 3500); // give a question longer dwell.
+        v.holdMs = std::max(v.holdMs, 3500); // give a question longer dwell.
         v.lines.push_back({a.clarifyQuestion.empty() ? "which one?" : a.clarifyQuestion,
                            EHudColor::Accent, true});
         for (const auto& c : a.clarifyCandidates)

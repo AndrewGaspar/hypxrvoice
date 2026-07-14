@@ -1,6 +1,6 @@
 #include "Feedback.hpp"
+#include "HudClient.hpp"
 #include "HudModel.hpp"
-#include "HudOverlay.hpp"
 #include "Log.hpp"
 #include "Tts.hpp"
 
@@ -13,7 +13,7 @@ extern char** environ;
 
 namespace {
     // Fire a notify-send toast without a shell (no injection from transcript text).
-    void notify(const std::string& summary, const std::string& body) {
+    void notifySend(const std::string& summary, const std::string& body) {
         const char* argv[] = {"notify-send", "-a", "hypxrvoice", "-t", "3000",
                               summary.c_str(), body.c_str(), nullptr};
         pid_t       pid    = -1;
@@ -25,17 +25,28 @@ namespace {
         waitpid(pid, &status, 0);
     }
 
-    // Daemon-only feedback runtime. Constructed lazily by startRuntime(); the emit
-    // functions consult g_rt.active so oneshot/tests (which never start it) keep the
-    // pure stdout/log/notify behaviour and never touch the HUD subprocess or XR.
+    // The notify-send sink, redirectable for tests (see _setNotifySinkForTest).
+    std::function<void(const std::string&, const std::string&)> g_notifySink = notifySend;
+    void notify(const std::string& summary, const std::string& body) {
+        if (g_notifySink)
+            g_notifySink(summary, body);
+    }
+
+    // Daemon-only feedback runtime. Activated by startRuntime(); the emit functions
+    // consult g_rt.active so oneshot/tests (which never start it) keep the pure
+    // stdout/log/notify behaviour and never touch the HUD daemon / D-Bus.
     struct SRuntime {
-        bool        active = false;
-        CHudOverlay hud;
+        bool       active = false;
+        CHudClient hud;
     };
     SRuntime g_rt;
 }
 
 namespace Feedback {
+    void _setNotifySinkForTest(std::function<void(const std::string&, const std::string&)> sink) {
+        g_notifySink = sink ? std::move(sink) : notifySend;
+    }
+
     void startRuntime(const SConfig& cfg) {
         g_rt.active = true;
         g_rt.hud.configure(cfg);
@@ -43,7 +54,7 @@ namespace Feedback {
             Log::log(Log::INFO, "TTS mode '{}' ({})", cfg.feedback.ttsMode,
                      Tts::available() ? "espeak-ng found" : "espeak-ng NOT on PATH — TTS disabled");
         if (cfg.feedback.hud)
-            Log::log(Log::INFO, "HUD overlay enabled (spawns on first feedback)");
+            Log::log(Log::INFO, "HUD enabled — pushing panels to hypxrhud (slot '{}')", cfg.feedback.hudSlot);
     }
 
     void stopRuntime() {
@@ -58,15 +69,12 @@ namespace Feedback {
 
     void onListeningStart(const SConfig& cfg) {
         if (g_rt.active && cfg.feedback.hud)
-            g_rt.hud.send(hudForListening("", cfg));
+            g_rt.hud.show(hudForListening("", cfg));
     }
 
     void onListeningStop(const SConfig& cfg) {
-        if (g_rt.active && cfg.feedback.hud) {
-            SHudView hide;
-            hide.state = EHudState::Hidden;
-            g_rt.hud.send(hide);
-        }
+        if (g_rt.active && cfg.feedback.hud)
+            g_rt.hud.hide();
     }
 
     void emitTranscript(const STranscript& t, const SConfig& cfg) {
@@ -78,12 +86,14 @@ namespace Feedback {
                  activationName(t.activation), t.onsetMs, t.words.size(), t.text);
 
         // While listening, echo the partial transcript on the HUD (the veto preview).
+        // show() returns true only when it reached a LIVE hypxrhud (daemon up + runtime
+        // "live"), so the notify-send fallback below stays quiet in that case.
+        bool hudCarrying = false;
         if (g_rt.active && cfg.feedback.hud && !t.text.empty())
-            g_rt.hud.send(hudForListening(t.text, cfg));
+            hudCarrying = g_rt.hud.show(hudForListening(t.text, cfg));
 
         // notify-send is the HUD-less fallback: only toast the transcript when the HUD
         // is not carrying it (keeps a headset user's desktop quiet).
-        const bool hudCarrying = g_rt.active && cfg.feedback.hud && g_rt.hud.enabled();
         if (cfg.feedback.notify && !hudCarrying && !t.text.empty())
             notify("hypxrvoice", t.text);
     }
@@ -107,11 +117,12 @@ namespace Feedback {
             return;
         }
 
-        // In-headset HUD: the primary channel. Build the view and send it.
+        // In-headset HUD: the primary channel. Build the view and push it to hypxrhud.
+        // show() returns true only when it reached a live daemon (else notify-send below).
         bool hudShown = false;
         if (g_rt.active && cfg.feedback.hud) {
             SHudView v = hudForAction(a, plan, cfg);
-            hudShown   = g_rt.hud.send(v);
+            hudShown   = g_rt.hud.show(v);
         }
 
         // Terse TTS: confirms what the HUD can't (errors, clarify; success only in
