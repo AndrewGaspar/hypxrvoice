@@ -25,6 +25,7 @@ enum class EHudState {
     Action,    // a recognised command — the veto window before/while it executes.
     Clarify,   // ambiguous — a question + candidate targets.
     Error,     // recognised but could not be carried out (refused/unsupported).
+    Rejected,  // the window produced no command (nothing heard, or nothing parsed).
 };
 const char* hudStateName(EHudState s);
 
@@ -79,6 +80,18 @@ SHudView hudForListening(const std::string& partial, const SConfig& cfg);
 // confidence, approximated/dry-run, and Clarify candidates into a panel. This is the
 // single richest builder and the one most worth testing.
 SHudView hudForAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg);
+
+// The rejection panel — a capture window that produced NO command.
+//
+// WHY (WP-V6 live-validation finding): hudForAction() used to answer EVerb::None with a
+// Hidden view, so a transcript the parser could not use left the user staring at
+// "listening…" with no way to tell whether the mic, the ASR, or the grammar was at
+// fault. Six consecutive utterances gave zero feedback. A rejected window now SAYS so.
+//
+// `transcript` is what was heard, verbatim ("" when nothing was heard at all — VAD found
+// no speech or ASR returned empty). `note` overrides the default second line, for
+// rejections with a more specific cause (e.g. no ASR model loaded).
+SHudView hudForRejection(const std::string& transcript, const std::string& note, const SConfig& cfg);
 
 // A short human phrase for a verb+target (shared by HUD title and TTS). e.g.
 // "moving XR-code", "which firefox?", "opening browser".

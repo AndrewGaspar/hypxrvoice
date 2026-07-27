@@ -41,7 +41,9 @@ namespace IntentPipeline {
         // 3. Plan (pure) + 4. feedback sink + 5. execute (or dry-run).
         SExecConfig ec = execConfig(cfg);
         r.plan         = planFor(r.action, r.ctx, ec);
-        Feedback::emitAction(r.action, r.plan, cfg);
+        // The transcript rides along so an unparseable utterance can be shown back to the
+        // user instead of silently hiding the HUD (WP-V6 silent-rejection fix).
+        Feedback::emitAction(r.action, r.plan, cfg, t.text);
         r.dispatched = runPlan(r.plan, ec, runner);
         return r;
     }

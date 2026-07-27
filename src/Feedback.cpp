@@ -40,6 +40,32 @@ namespace {
         CHudClient hud;
     };
     SRuntime g_rt;
+
+    std::string jsonEscape(const std::string& s) {
+        std::string o;
+        for (char c : s) {
+            if (c == '"' || c == '\\')
+                o += '\\';
+            o += c;
+        }
+        return o;
+    }
+
+    // The user-visible half of a rejection, shared by the intent-tier EVerb::None path
+    // (emitAction, which has already logged its own line) and the pre-intent rejections
+    // (emitRejected). HUD first, notify-send only when the HUD didn't carry it.
+    void showRejection(const std::string& transcript, const std::string& note, const SConfig& cfg) {
+        bool hudShown = false;
+        if (g_rt.active && cfg.feedback.hud)
+            hudShown = g_rt.hud.show(hudForRejection(transcript, note, cfg));
+
+        if (cfg.feedback.notify && !hudShown) {
+            std::string body = transcript.empty() ? "didn't hear anything"
+                                                  : transcript + " — " +
+                                                        (note.empty() ? "no command" : note);
+            notify("hypxrvoice", body);
+        }
+    }
 }
 
 namespace Feedback {
@@ -98,7 +124,20 @@ namespace Feedback {
             notify("hypxrvoice", t.text);
     }
 
-    void emitAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg) {
+    void emitRejected(const std::string& transcript, const SConfig& cfg, const std::string& note) {
+        if (cfg.feedback.stdoutJson) {
+            std::fprintf(stdout, "{\"kind\":\"rejected\",\"text\":\"%s\",\"note\":\"%s\"}\n",
+                         jsonEscape(transcript).c_str(), jsonEscape(note).c_str());
+            std::fflush(stdout);
+        }
+        Log::log(Log::INFO, "rejected: {}{}",
+                 transcript.empty() ? "no speech captured" : "\"" + transcript + "\"",
+                 note.empty() ? "" : " (" + note + ")");
+        showRejection(transcript, note, cfg);
+    }
+
+    void emitAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg,
+                    const std::string& utterance) {
         // Single machine-readable line: {"kind":"action","action":{…},"plan":{…}}.
         if (cfg.feedback.stdoutJson) {
             std::fprintf(stdout, "{\"kind\":\"action\",\"action\":%s,\"plan\":%s}\n",
@@ -110,10 +149,17 @@ namespace Feedback {
                  targetSourceName(a.targetSource), a.confidence, plan.steps.size(),
                  plan.approximated ? "(approx)" : "");
 
-        // Nothing recognised as a command: keep quiet (and clear a listening HUD).
+        // Nothing recognised as a command. Do NOT go quiet: hiding the HUD here is what
+        // made six consecutive live utterances look identical to a dead microphone
+        // (WP-V6). Show the transcript back with a "no command" note instead; only a
+        // genuinely empty utterance (nothing to echo) falls back to dismissing the panel.
         if (a.verb == EVerb::None) {
-            if (g_rt.active && cfg.feedback.hud)
-                onListeningStop(cfg);
+            if (utterance.empty()) {
+                if (g_rt.active && cfg.feedback.hud)
+                    onListeningStop(cfg);
+                return;
+            }
+            showRejection(utterance, "", cfg);
             return;
         }
 

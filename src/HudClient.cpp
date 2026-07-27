@@ -33,6 +33,10 @@ uint32_t hudUrgencyForState(EHudState s) {
         case EHudState::Action:    return 2;
         case EHudState::Clarify:   return 3; // a question the user must answer wins the slot.
         case EHudState::Error:     return 3; // a refusal likewise outranks routine panels.
+        // A rejection must outrank the listening panel it replaces (otherwise the slot
+        // could keep showing "listening…"), but it is not a veto — it stays below
+        // clarify/error.
+        case EHudState::Rejected:  return 2;
     }
     return 1;
 }

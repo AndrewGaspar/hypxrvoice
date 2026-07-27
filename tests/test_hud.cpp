@@ -128,11 +128,77 @@ TEST_CASE("hud: approximated plan is flagged") {
 }
 
 TEST_CASE("hud: none verb yields a hidden panel") {
+    // hudForAction is pure and has no transcript to echo, so it still answers Hidden; the
+    // rejection panel is built by the caller from the utterance (hudForRejection below).
     SConfig cfg;
     SAction a; a.verb = EVerb::None;
     SExecPlan plan;
     SHudView v = hudForAction(a, plan, cfg);
     CHECK(v.state == EHudState::Hidden);
+}
+
+// ---- rejection panels (WP-V6: never leave a window with no feedback) --------------------
+
+TEST_CASE("hud: an unparseable transcript is echoed back, never hidden") {
+    SConfig  cfg;
+    SHudView v = hudForRejection("put the editor here", "", cfg);
+
+    CHECK(v.state == EHudState::Rejected);
+    CHECK(v.state != EHudState::Hidden); // the bug: silence was indistinguishable from a dead mic
+    CHECK_FALSE(v.empty());
+    REQUIRE(v.lines.size() == 2);
+    // What we heard, verbatim, as the title — proof the mic and ASR worked.
+    CHECK(v.lines.front().text == "put the editor here");
+    CHECK(v.lines.front().big);
+    CHECK(v.lines.front().color == EHudColor::Normal);
+    // ...and why it went nowhere.
+    CHECK(v.lines.back().text == "didn't catch a command");
+    CHECK(v.lines.back().color == EHudColor::Warn);
+    CHECK(v.confidence < 0.f);   // no confidence bar on a rejection
+    CHECK(v.holdMs > 0);         // transient
+    CHECK(v.holdMs <= 3000);     // and brief — an acknowledgement, not a read
+}
+
+TEST_CASE("hud: an empty window says nothing was heard") {
+    SConfig  cfg;
+    SHudView v = hudForRejection("", "", cfg);
+    CHECK(v.state == EHudState::Rejected);
+    REQUIRE(v.lines.size() == 1);
+    CHECK(v.lines.front().text == "didn't hear anything");
+    CHECK(v.lines.front().color == EHudColor::Dim);
+    CHECK(v.holdMs > 0);
+}
+
+TEST_CASE("hud: a rejection note overrides the default reason line") {
+    SConfig cfg;
+    SHudView withText = hudForRejection("workspace three", "no speech model loaded", cfg);
+    REQUIRE(withText.lines.size() == 2);
+    CHECK(withText.lines.back().text == "no speech model loaded");
+
+    SHudView noText = hudForRejection("", "no speech model loaded", cfg);
+    REQUIRE(noText.lines.size() == 2);
+    CHECK(noText.lines.front().text == "didn't hear anything");
+    CHECK(noText.lines.back().text == "no speech model loaded");
+}
+
+TEST_CASE("hud props: a rejection outranks listening but not a clarify/error veto") {
+    CHECK(hudUrgencyForState(EHudState::Rejected) > hudUrgencyForState(EHudState::Listening));
+    CHECK(hudUrgencyForState(EHudState::Rejected) < hudUrgencyForState(EHudState::Clarify));
+    CHECK(hudUrgencyForState(EHudState::Rejected) < hudUrgencyForState(EHudState::Error));
+
+    SConfig   cfg;
+    SHudProps p = hudPropsFromView(hudForRejection("browser", "", cfg), "voice");
+    CHECK(p.slot == "voice");
+    CHECK(p.kind == "text");
+    CHECK(p.holdMs > 0); // transient, unlike the persistent listening panel
+    CHECK(propsHasLine(p, "browser"));
+    CHECK(propsHasLine(p, "didn't catch a command"));
+    CHECK(p.confidence < 0.f); // no confidence prop emitted
+}
+
+TEST_CASE("hud: every state has a name") {
+    CHECK(std::string(hudStateName(EHudState::Rejected)) == "rejected");
+    CHECK(std::string(hudStateName(EHudState::Hidden)) == "hidden");
 }
 
 // ---- view -> hypxrhud panel-props mapping ---------------------------------------------

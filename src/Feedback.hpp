@@ -24,7 +24,20 @@ namespace Feedback {
     // The V4 command sink, now V5-wired: emits the machine-readable line + log, drives
     // the in-headset HUD (via the overlay subprocess) and terse TTS, and keeps
     // notify-send as the degraded fallback when the HUD is unavailable.
-    void emitAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg);
+    // `utterance` is the transcript the action came from. It matters for the EVerb::None
+    // case: instead of hiding the HUD (the WP-V6 silent-rejection bug) the sink shows the
+    // transcript back with a "no command" note. Defaulted so the offline/oneshot callers
+    // and tests are unaffected.
+    void emitAction(const SAction& a, const SExecPlan& plan, const SConfig& cfg,
+                    const std::string& utterance = "");
+
+    // A capture window that produced no command at all — the pre-intent rejections:
+    // nothing heard (VAD found no speech / ASR empty, `transcript` == ""), or a
+    // transcript that never reached the intent tier. `note` overrides the panel's
+    // default second line for a more specific cause. Never silent: an explicitly
+    // requested (PTT) window must always tell the user what happened.
+    void emitRejected(const std::string& transcript, const SConfig& cfg,
+                      const std::string& note = "");
 
     // ---- WP-V5 runtime (daemon-only; oneshot/tests never call these, so they never
     // spawn an XR client). start once at daemon init, stop at teardown, poll each tick.

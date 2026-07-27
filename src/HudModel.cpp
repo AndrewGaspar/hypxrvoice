@@ -9,6 +9,7 @@ const char* hudStateName(EHudState s) {
         case EHudState::Action:    return "action";
         case EHudState::Clarify:   return "clarify";
         case EHudState::Error:     return "error";
+        case EHudState::Rejected:  return "rejected";
     }
     return "?";
 }
@@ -96,6 +97,9 @@ SHudView hudForAction(const SAction& a, const SExecPlan& plan, const SConfig& cf
     v.approximated = plan.approximated;
 
     if (a.verb == EVerb::None) {
+        // Nothing to ACT on — but "nothing to act on" is not "nothing to say". This
+        // builder is pure and has no transcript, so the rejection panel is built by the
+        // caller from the utterance text (hudForRejection, via Feedback::emitAction).
         v.state = EHudState::Hidden;
         return v;
     }
@@ -137,5 +141,27 @@ SHudView hudForAction(const SAction& a, const SExecPlan& plan, const SConfig& cf
 
     // Confidence bar (only meaningful for actionable verbs).
     v.confidence = std::clamp(static_cast<float>(a.confidence), 0.f, 1.f);
+    return v;
+}
+
+SHudView hudForRejection(const std::string& transcript, const std::string& note, const SConfig& cfg) {
+    (void)cfg;
+    SHudView v;
+    v.state  = EHudState::Rejected;
+    v.holdMs = 2500; // brief — it is an acknowledgement, not something to read twice.
+
+    if (transcript.empty()) {
+        // Nothing was heard: say exactly that, so a dead mic is distinguishable from a
+        // grammar miss without reading the journal.
+        v.lines.push_back({"didn't hear anything", EHudColor::Dim, true});
+        if (!note.empty())
+            v.lines.push_back({note, EHudColor::Dim, false});
+        return v;
+    }
+
+    // Heard something: echo it VERBATIM (proof the audio path and ASR worked) above the
+    // reason it went nowhere.
+    v.lines.push_back({transcript, EHudColor::Normal, true});
+    v.lines.push_back({note.empty() ? "didn't catch a command" : note, EHudColor::Warn, false});
     return v;
 }
