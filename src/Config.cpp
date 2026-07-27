@@ -179,6 +179,8 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setInt(out.vad.maxUtteranceMs, val);
         } else if (k == "vad.pre_roll_ms") {
             setInt(out.vad.preRollMs, val);
+        } else if (k == "vad.onset_backpad_ms") {
+            setInt(out.vad.onsetBackpadMs, val);
         } else if (k == "vad.adaptive") {
             setBool(out.vad.adaptive, val);
         } else if (k == "vad.noise_floor_factor") {
@@ -263,6 +265,12 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.executor.targetedGrab, val);
         } else if (k == "executor.place_at_pose") {
             setBool(out.executor.placeAtPose, val);
+        } else if (k == "executor.allow_window") {
+            setBool(out.executor.allowWindow, val);
+        } else if (k == "debug.dump_audio_dir") {
+            setStr(out.debug.dumpAudioDir, val);
+        } else if (k == "debug.dump_audio_keep") {
+            setInt(out.debug.dumpAudioKeep, val);
         } else if (section == "apps") {
             // [apps] allowlist: any key is an app alias mapped to a trusted command.
             std::string s;

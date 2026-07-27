@@ -164,3 +164,151 @@ TEST_CASE("vad: contiguous chunked feeding matches timing") {
     CHECK(segs[0].onsetMs >= base + 200);
     CHECK(segs[0].onsetMs <= base + 500);
 }
+
+// ---- onset back-pad (the round-2 "leading word is missing" fix) ----
+//
+// The ring is fed EVERY idle frame, including the voiced frames of the run that declares
+// onset, and onset is back-dated to the FIRST of those. So a ring of exactly pre_roll_ms
+// leaves only (pre_roll_ms - start_ms) in front of the ONSET instant. A first syllable
+// that is quiet — an unvoiced fricative, or any source still ramping its gain when you
+// start talking — lives in that gap and was dropped even though it was in the buffer.
+
+// A quiet leading syllable (below the gate) followed by the loud body of the utterance.
+// Layout: 600 ms silence | 300 ms quiet | 700 ms loud | 600 ms silence.
+static std::vector<float> makeQuietOnset(float quietAmp, float loudAmp) {
+    const int sr = 16000;
+    auto      ms = [&](int m) { return sr * m / 1000; };
+    std::vector<float> b;
+    b.insert(b.end(), ms(600), 0.f);
+    for (int i = 0; i < ms(300); i++)
+        b.push_back(quietAmp * std::sin(2.0 * M_PI * 300.0 * (b.size() + i) / sr));
+    for (int i = 0; i < ms(700); i++)
+        b.push_back(loudAmp * std::sin(2.0 * M_PI * 300.0 * (b.size() + i) / sr));
+    b.insert(b.end(), ms(600), 0.f);
+    return b;
+}
+
+TEST_CASE("vad: a quiet first syllable survives — the segment carries the full back-pad") {
+    SVadConfig cfg;
+    cfg.adaptive        = false; // deterministic gate; the adaptive path has its own tests
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 100;
+    cfg.endMs           = 300;
+    cfg.preRollMs       = 300;
+    cfg.onsetBackpadMs  = 300;
+    CVad vad(cfg);
+
+    // Quiet amp 0.05 => RMS ~0.035, comfortably UNDER the 0.05 gate, so the syllable
+    // never triggers onset by itself. It must be recovered by the back-pad, not the gate.
+    auto buf = makeQuietOnset(0.05f, 0.30f);
+
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    REQUIRE(segs.size() == 1);
+    const auto& s = segs[0];
+
+    // Onset lands on the LOUD body (~900 ms), which is the only thing that trips the gate.
+    CHECK(s.onsetMs >= 850);
+    CHECK(s.onsetMs <= 1000);
+    // …and the contract: at least onset_backpad_ms of audio sits in front of it, which is
+    // enough to reach back to the start of the quiet syllable at 600 ms.
+    CHECK(s.backpadMs() >= cfg.onsetBackpadMs);
+    CHECK(s.bufferStartMs <= 600);
+
+    // The quiet syllable is really in the samples — not silence, not a hole.
+    const size_t quietEnd = static_cast<size_t>((900 - s.bufferStartMs) * 16) ;
+    REQUIRE(quietEnd > 0);
+    REQUIRE(quietEnd <= s.samples.size());
+    double acc = 0;
+    for (size_t i = 0; i < quietEnd; i++)
+        acc += static_cast<double>(s.samples[i]) * s.samples[i];
+    const double leadRms = std::sqrt(acc / quietEnd);
+    CHECK(leadRms > 0.02); // ~0.035 for a 0.05-amplitude tone; nowhere near silence
+}
+
+TEST_CASE("vad: with no back-pad the same quiet syllable is clipped (the bug)") {
+    // onset_backpad_ms = 0 reproduces the old sizing: the ring is just pre_roll_ms, so
+    // start_ms of it is spent on the voiced run and the segment begins INSIDE the quiet
+    // syllable. Same audio, same gate — only the retention changes.
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 100;
+    cfg.endMs           = 300;
+    cfg.preRollMs       = 300;
+    cfg.onsetBackpadMs  = 0;
+    CVad vad(cfg);
+
+    auto                        buf = makeQuietOnset(0.05f, 0.30f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    REQUIRE(segs.size() == 1);
+    CHECK(segs[0].backpadMs() < 300);
+    CHECK(segs[0].bufferStartMs > 600); // the syllable started at 600 ms and got cut
+}
+
+TEST_CASE("vad: the splice does not duplicate the trigger frame") {
+    // The utterance used to be seeded with the whole ring AND the current frame again —
+    // 20 ms of duplicated audio that shifted every ASR word timestamp after the splice.
+    // Sample count vs. the timestamps is the check: samples must span exactly
+    // bufferStartMs..endMs with no extra frame.
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 100;
+    cfg.endMs           = 300;
+    cfg.preRollMs       = 200;
+    cfg.onsetBackpadMs  = 200;
+    CVad vad(cfg);
+
+    auto                        buf = makeUtterance(500, 800, 600, 0.3f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    REQUIRE(segs.size() == 1);
+    const auto&   s        = segs[0];
+    const int64_t spanMs   = s.endMs - s.bufferStartMs;
+    const int64_t actualMs = static_cast<int64_t>(s.samples.size()) * 1000 / 16000;
+    CHECK(actualMs == spanMs);
+}
+
+TEST_CASE("vad: a second utterance right after the first still gets its full back-pad") {
+    // The ring used to be fed only while IDLE, so it was emptied into the utterance at
+    // onset and stayed empty until that utterance endpointed. Speak again shortly after
+    // the hangover and the back-pad was whatever had refilled since — near zero — which
+    // reopened the very gap this feature closes, just for the second command.
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 100;
+    cfg.endMs           = 300;
+    cfg.preRollMs       = 300;
+    cfg.onsetBackpadMs  = 300;
+    CVad vad(cfg);
+
+    // 600 silence | 400 loud | 350 silence (endpoints at 1300) | 150 quiet | 700 loud | tail
+    const int sr = 16000;
+    auto      ms = [&](int m) { return sr * m / 1000; };
+    auto      tone = [&](std::vector<float>& b, int lenMs, float amp) {
+        const size_t n0 = b.size();
+        for (int i = 0; i < ms(lenMs); i++)
+            b.push_back(amp * std::sin(2.0 * M_PI * 300.0 * (n0 + i) / sr));
+    };
+    std::vector<float> buf;
+    buf.insert(buf.end(), ms(600), 0.f);
+    tone(buf, 400, 0.30f);
+    buf.insert(buf.end(), ms(350), 0.f);
+    tone(buf, 150, 0.05f); // the second command's quiet first syllable
+    tone(buf, 700, 0.30f);
+    buf.insert(buf.end(), ms(600), 0.f);
+
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    REQUIRE(segs.size() == 2);
+    CHECK(segs[0].backpadMs() >= cfg.onsetBackpadMs);
+    CHECK(segs[1].backpadMs() >= cfg.onsetBackpadMs);
+    // …and that back-pad reaches back past the start of the quiet syllable (1350 ms).
+    CHECK(segs[1].bufferStartMs <= 1350);
+}

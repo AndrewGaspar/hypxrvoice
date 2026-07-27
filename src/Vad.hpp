@@ -20,8 +20,23 @@ struct SVadConfig {
     int   startMs         = 150;    // sustained voiced to declare onset
     int   endMs           = 600;    // sustained silence (hangover) to declare end
     int   maxUtteranceMs  = 12000;
-    int   preRollMs       = 300;    // audio retained before the onset instant
+    int   preRollMs       = 300;    // raw depth of the idle retention ring
     int   frameMs         = 20;     // analysis window
+
+    // Audio GUARANTEED to sit in front of the DECLARED ONSET instant.
+    //
+    // WHY THIS IS NOT preRollMs (round-2 live finding): the ring is fed EVERY idle
+    // frame, including the voiced frames of the run that eventually declares onset, and
+    // onset is back-dated to the FIRST voiced frame of that run (startMs earlier). So a
+    // ring of exactly preRollMs leaves only (preRollMs - startMs) in front of onset —
+    // 150 ms at the shipped defaults, half of what preRollMs's own comment claimed. A
+    // first syllable that is quiet (an unvoiced fricative; or any source whose AGC is
+    // still ramping when you start talking) sits under the gate for longer than that and
+    // was structurally dropped even though it had been sitting in the ring the whole
+    // time. The ring is therefore sized as max(preRollMs, onsetBackpadMs + startMs), and
+    // an emitted segment always carries at least onsetBackpadMs of audio before onsetMs
+    // — clamped, of course, to the audio the stream has actually delivered so far.
+    int   onsetBackpadMs  = 300;
 
     // Noise-floor-adaptive gating. A FIXED energyThreshold cannot survive a hot,
     // AGC-driven source (e.g. the Quest/WiVRn mic, whose ambient RMS ran ~0.09 —
@@ -46,6 +61,12 @@ struct SSpeechSegment {
                                           // (= onset minus captured pre-roll). ASR
                                           // word offsets are added to THIS.
     std::vector<float> samples;           // 16 kHz mono, incl. pre-roll
+
+    // How much audio actually landed in FRONT of the onset instant. Equals
+    // onsetMs - bufferStartMs; carried explicitly because it is the number that says
+    // whether a quiet first syllable could have survived (see SVadConfig::onsetBackpadMs)
+    // and it is what the debug dumps and the daemon log line report.
+    int64_t backpadMs() const { return onsetMs - bufferStartMs; }
 };
 
 class CVad {

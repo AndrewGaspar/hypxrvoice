@@ -35,10 +35,12 @@ void CDaemon::resetVad() {
     vc.endMs           = m_cfg.vad.endMs;
     vc.maxUtteranceMs  = m_cfg.vad.maxUtteranceMs;
     vc.preRollMs       = m_cfg.vad.preRollMs;
+    vc.onsetBackpadMs  = m_cfg.vad.onsetBackpadMs;
     vc.adaptive        = m_cfg.vad.adaptive;
     vc.noiseFloorFactor = m_cfg.vad.noiseFloorFactor;
     vc.noiseWindowMs   = m_cfg.vad.noiseWindowMs;
     m_vad              = std::make_unique<CVad>(vc);
+    m_dump.noteVadConfig(vc);
 }
 
 bool CDaemon::init(const std::string& configPath, std::string& err) {
@@ -52,6 +54,7 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
         Log::log(Log::WARN, "config: {}", w);
 
     m_machine.configure(m_cfg.activation.mode, m_cfg.activation.fallback);
+    applyDumpConfig();
     resetVad();
     m_preRoll.configure(m_cfg.audio.sampleRate, m_cfg.capture.preRollMs);
 
@@ -101,6 +104,19 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
     Log::log(Log::INFO, "hypxrvoiced ready — state {}, mode {}", stateName(m_machine.state()),
              m_cfg.activation.mode == EActivationMode::Auto ? "auto" : (m_cfg.activation.mode == EActivationMode::Ptt ? "ptt" : "wake"));
     return true;
+}
+
+// Apply debug.dump_audio_dir. Off by default; while it is ON the daemon says so on
+// every (re)load, because it means microphone audio is landing on disk.
+void CDaemon::applyDumpConfig() {
+    std::string err;
+    if (!m_dump.configure(m_cfg.debug.dumpAudioDir, m_cfg.debug.dumpAudioKeep,
+                          m_cfg.audio.sampleRate, err))
+        Log::log(Log::ERR, "audio dump disabled: {}", err);
+    else if (m_dump.enabled())
+        Log::log(Log::WARN, "debug.dump_audio_dir is SET — capture audio is being written to {} "
+                            "(last {} windows); unset it when you are done",
+                 m_dump.dir(), m_cfg.debug.dumpAudioKeep);
 }
 
 void CDaemon::loadIntentBackend() {
@@ -173,14 +189,23 @@ void CDaemon::drainAudio() {
         return;
 
     std::vector<SSpeechSegment> segs;
-    for (auto& c : local)
+    for (auto& c : local) {
+        m_dump.appendWindow(c.samples.data(), c.samples.size(), c.monoMs);
         m_vad->push(c.samples.data(), c.samples.size(), c.monoMs, segs);
+    }
     for (auto& s : segs)
         handleSegment(s);
     updateListeningHud(); // reflect the latest VAD in-speech state on the HUD.
 }
 
 void CDaemon::handleSegment(const SSpeechSegment& seg) {
+    // The backpad is the number that says whether a quiet first syllable could have
+    // survived at all (see SVadConfig::onsetBackpadMs); log it on every segment so the
+    // journal alone distinguishes "cut short" from "never arrived".
+    Log::log(Log::DEBUG, "segment: onset {}ms len {}ms backpad {}ms ({} samples)", seg.onsetMs,
+             seg.endMs - seg.onsetMs, seg.backpadMs(), seg.samples.size());
+    m_dump.noteSegment(seg);
+
     const bool pttWindow = m_machine.state() == EState::Listening && m_machine.currentActivation() == EActivation::PushToTalk;
     const bool requireWake = !pttWindow;
     const EActivation act = pttWindow ? EActivation::PushToTalk : EActivation::WakeWord;
@@ -228,8 +253,13 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
         }
         auto r = IntentPipeline::process(t, m_cfg, defaultHyprctlQuery, defaultGazeQuery,
                                          defaultRunner, backend);
-        m_lastAction = std::string(verbName(r.action.verb)) +
-                       (r.action.target.empty() ? "" : " " + r.action.target);
+        m_lastAction = std::string(verbName(r.action.verb));
+        if (r.action.verb == EVerb::Workspace)
+            m_lastAction += " " + std::to_string(r.action.workspace);
+        else if (!r.action.windowLabel.empty())
+            m_lastAction += " " + r.action.windowLabel;
+        else if (!r.action.target.empty())
+            m_lastAction += " " + r.action.target;
         // The intent tier owns the HUD from here: EVerb::None means it showed the
         // transcript back as a rejection panel, which `status` should say too.
         if (r.action.verb == EVerb::None)
@@ -290,11 +320,13 @@ void CDaemon::startCapture(const std::string& source) {
 // of arriving with its first word missing.
 void CDaemon::openCaptureWindow() {
     resetVad();
+    m_dump.beginWindow(Clock::monotonicMs());
     std::vector<float> pre;
     int64_t            preStartMs = 0;
     const size_t       n          = m_preRoll.drain(pre, preStartMs);
     if (n == 0)
         return;
+    m_dump.notePreRoll(pre.data(), pre.size(), preStartMs);
     std::vector<SSpeechSegment> segs;
     m_vad->push(pre.data(), pre.size(), preStartMs, segs);
     // The ring is shorter than an utterance, but a segment CAN close inside it if the
@@ -338,6 +370,7 @@ void CDaemon::applyMicPolicy() {
         // honest (no "listening…" merely because the wake word is armed).
     } else if (!active && m_captureActive) {
         m_captureActive = false;
+        m_dump.endWindow(m_lastOutcome, m_lastText);
         m_preRoll.clear(); // start the next window's pre-roll from post-window audio only
         updateListeningHud(); // gate closed → drop any listening panel we own.
     }
@@ -566,6 +599,7 @@ std::string CDaemon::doReload() {
         Log::log(Log::WARN, "config: {}", w);
 
     m_machine.configure(m_cfg.activation.mode, m_cfg.activation.fallback);
+    applyDumpConfig();
     resetVad();
     m_preRoll.configure(m_cfg.audio.sampleRate, m_cfg.capture.preRollMs);
 

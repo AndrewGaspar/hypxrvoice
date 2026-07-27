@@ -50,7 +50,11 @@ struct SConfig {
         int   startMs         = 150;    // sustained voiced to declare onset
         int   endMs           = 600;    // sustained silence (hangover) to end
         int   maxUtteranceMs  = 12000;
-        int   preRollMs       = 300;    // audio retained before the onset point
+        int   preRollMs       = 300;    // raw depth of the VAD's idle retention ring
+        // Audio GUARANTEED to precede the declared onset instant. Not the same thing as
+        // pre_roll_ms — see SVadConfig::onsetBackpadMs for why the old key delivered only
+        // (pre_roll_ms - start_ms) and structurally lost quiet first syllables.
+        int   onsetBackpadMs  = 300;
         // Noise-floor-adaptive gating (survives a hot AGC source like the WiVRn mic).
         bool  adaptive         = true;
         float noiseFloorFactor = 1.6f;  // voiced threshold = max(energy_threshold, floor*factor)
@@ -122,7 +126,25 @@ struct SConfig {
         bool allowLaunch    = false; // permit app launch (allowlisted only).
         bool targetedGrab   = false; // compositor advertises `gazegrab <name>` (GAP).
         bool placeAtPose    = false; // compositor advertises `place <name> at …` (GAP).
+        // Plain window management: focus a live window, toggle fullscreen, switch
+        // workspace. Non-destructive and reversible (nothing here can close, kill, or
+        // move a window), so it is on by default — executor.dry_run still gates it.
+        bool allowWindow    = true;
     } executor;
+
+    // Opt-in capture forensics. OFF unless dumpAudioDir is set; when it is, every
+    // capture window writes the FULL window audio (pre-roll splice included) plus each
+    // segment handed to whisper, with a sidecar recording the splice point and the VAD
+    // boundaries. This is the discriminator between "the source never sent the first
+    // word" and "our segmenter cut it" — see AudioDump.hpp.
+    //
+    // PRIVACY: setting this writes microphone audio to disk. It exists for a debugging
+    // session and should be unset again afterwards; the daemon logs a WARN at startup
+    // for as long as it is on.
+    struct {
+        std::string dumpAudioDir;      // empty (default) = no dumping, nothing touched
+        int         dumpAudioKeep = 50; // windows retained on disk; older ones are pruned
+    } debug;
 
     // [apps] allowlist: spoken app key -> a TRUSTED launch command (uwsm/systemd-run).
     // Never derived from transcript text; consumed only by launch_app.

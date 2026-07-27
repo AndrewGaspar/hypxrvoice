@@ -13,7 +13,18 @@ CVad::CVad(const SVadConfig& cfg) : m_cfg(cfg) {
     m_frameSamples  = static_cast<size_t>(m_cfg.sampleRate) * m_cfg.frameMs / 1000;
     if (m_frameSamples == 0)
         m_frameSamples = 1;
-    m_preRollFrames = std::max(0, m_cfg.preRollMs) / std::max(1, m_cfg.frameMs);
+
+    // Ring depth: deep enough that onsetBackpadMs of audio still precedes the ONSET
+    // instant once the startMs voiced run that declares it has been consumed (see
+    // SVadConfig::onsetBackpadMs). Rounded UP so the guarantee is met rather than missed
+    // by a frame. Always at least one frame — a zero-depth ring would drop the very
+    // frame that triggered onset.
+    const int backpadMs = std::max(0, m_cfg.onsetBackpadMs);
+    const int depthMs   = std::max(std::max(0, m_cfg.preRollMs), backpadMs + std::max(0, m_cfg.startMs));
+    m_preRollFrames     = static_cast<size_t>((depthMs + m_cfg.frameMs - 1) / m_cfg.frameMs);
+    if (m_preRollFrames == 0)
+        m_preRollFrames = 1;
+
     m_windowFrames  = std::max(1, m_cfg.noiseWindowMs) / std::max(1, m_cfg.frameMs);
     if (m_windowFrames == 0)
         m_windowFrames = 1;
@@ -82,28 +93,35 @@ void CVad::processFrame(const float* frame, int64_t frameStartMs, std::vector<SS
 
     const bool voiced = r >= currentThreshold();
 
-    if (!m_inSpeech) {
-        // Maintain the pre-roll ring while idle.
-        m_preRoll.emplace_back(frame, frame + m_frameSamples);
-        while (m_preRoll.size() > m_preRollFrames)
-            m_preRoll.pop_front();
+    // The retention ring runs CONTINUOUSLY — in speech as well as out of it. It used to
+    // be fed only while idle, so it was emptied into the utterance at onset and stayed
+    // empty until that utterance endpointed: a user who spoke again shortly after the
+    // hangover got a near-zero back-pad and lost their first syllable to exactly the gap
+    // this back-pad exists to close. Keeping it fed costs one bounded deque and means the
+    // ring always holds the tail of whatever just happened.
+    m_preRoll.emplace_back(frame, frame + m_frameSamples);
+    while (m_preRoll.size() > m_preRollFrames)
+        m_preRoll.pop_front();
 
+    if (!m_inSpeech) {
         if (voiced) {
             if (m_voicedRunMs == 0)
                 m_runStartMs = frameStartMs; // first voiced frame of this run
             m_voicedRunMs += m_cfg.frameMs;
             if (m_voicedRunMs >= m_cfg.startMs) {
-                // Onset. Seed the utterance with the pre-roll, then this frame.
+                // Onset. The utterance IS the ring: the current frame was pushed into it
+                // at the top of this call, so appending `frame` again (as this used to)
+                // duplicated 20 ms of audio at the splice and shifted every ASR word
+                // timestamp after it by one frame.
                 m_inSpeech     = true;
                 m_onsetMs      = m_runStartMs;
                 m_silenceRunMs = 0;
-                // samples[0] is the oldest pre-roll frame, which starts one frame
-                // per queued pre-roll frame before the current frame.
-                m_bufferStartMs = frameStartMs - static_cast<int64_t>(m_preRoll.size()) * m_cfg.frameMs;
+                // samples[0] is the oldest ring frame; the newest ring frame is the
+                // current one, hence size()-1 frames of lead-in ahead of frameStartMs.
+                m_bufferStartMs = frameStartMs - static_cast<int64_t>(m_preRoll.size() - 1) * m_cfg.frameMs;
                 m_utterance.clear();
                 for (auto& pf : m_preRoll)
                     m_utterance.insert(m_utterance.end(), pf.begin(), pf.end());
-                m_utterance.insert(m_utterance.end(), frame, frame + m_frameSamples);
                 m_preRoll.clear();
             }
         } else {
@@ -138,7 +156,9 @@ void CVad::emit(int64_t endMs, std::vector<SSpeechSegment>& out) {
     m_voicedRunMs  = 0;
     m_silenceRunMs = 0;
     m_utterance.clear();
-    m_preRoll.clear();
+    // NOTE: the ring is deliberately NOT cleared here — what it holds is the trailing
+    // hangover silence of the utterance just emitted, which is precisely the lead-in the
+    // next utterance needs.
 }
 
 bool CVad::flush(std::vector<SSpeechSegment>& out) {
