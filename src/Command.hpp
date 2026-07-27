@@ -35,6 +35,10 @@ enum class EVerb {
     Focus,      // "focus the browser" — raise/focus a LIVE window.
     Fullscreen, // "make this window fullscreen" — toggle fullscreen on a window.
     Workspace,  // "workspace three" — switch to a numbered workspace.
+    // "move terminal to the left monitor" / "send the browser to workspace 3" — relocate
+    // ONE live window to another output or workspace. Reversible like the rest of this
+    // group (the window is not closed, resized, or hidden), so it shares allow_window.
+    MoveWindow,
 };
 
 const char* verbName(EVerb v);
@@ -94,7 +98,8 @@ struct SAction {
     // "whatever is focused", which is the correct reading of "make it fullscreen".
     std::string   windowAddress;
     std::string   windowLabel;                   // human name for the HUD ("firefox").
-    // Workspace: the index WE parsed from the utterance, 1..99. 0 = none.
+    // Workspace: the index WE parsed from the utterance, 1..99. 0 = none. For MoveWindow
+    // a non-zero value means the destination is a WORKSPACE rather than a monitor.
     int           workspace = 0;
 
     SGazeResolution gaze;                        // populated when targetSource==Deixis.

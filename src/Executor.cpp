@@ -116,7 +116,7 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
     // These drive Hyprland itself rather than the XR layer, so they sit ahead of the
     // allow_xrmonitor gate and of the monitor-target validation below.
     if (action.verb == EVerb::Workspace || action.verb == EVerb::Focus ||
-        action.verb == EVerb::Fullscreen) {
+        action.verb == EVerb::Fullscreen || action.verb == EVerb::MoveWindow) {
         if (!cfg.allowWindow) {
             plan.reason = "window control disabled (executor.allow_window=false)";
             return plan;
@@ -131,6 +131,41 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
             plan.ok = true;
             plan.steps.push_back(step({"hyprctl", "dispatch", "workspace", std::to_string(action.workspace)},
                                       "switch to workspace " + std::to_string(action.workspace)));
+            return plan;
+        }
+
+        // MoveWindow: focus the window we are relocating (Hyprland's move dispatchers act
+        // on the ACTIVE window), then move it. An empty address means "the focused one",
+        // which is exactly what the dispatcher already operates on — so no focus step.
+        if (action.verb == EVerb::MoveWindow) {
+            if (!action.windowAddress.empty()) {
+                if (!ctx.hasWindow(action.windowAddress)) {
+                    plan.reason = "window '" + action.windowLabel + "' is not a live window — refusing";
+                    return plan;
+                }
+                plan.steps.push_back(step({"hyprctl", "dispatch", "focuswindow", "address:" + action.windowAddress},
+                                          "focus " + (action.windowLabel.empty() ? action.windowAddress
+                                                                                 : action.windowLabel)));
+            }
+            if (action.workspace > 0) {
+                if (action.workspace > 99) {
+                    plan.reason = "workspace index out of range — refusing";
+                    return plan;
+                }
+                plan.steps.push_back(step({"hyprctl", "dispatch", "movetoworkspace", std::to_string(action.workspace)},
+                                          "move to workspace " + std::to_string(action.workspace)));
+                plan.ok = true;
+                return plan;
+            }
+            // A monitor destination must be LIVE. `movewindow mon:<name>` relocates the
+            // active window onto that output's active workspace.
+            if (isActive(action.target) || !ctx.hasMonitor(action.target)) {
+                plan.reason = "target monitor '" + action.target + "' is not a live monitor — refusing";
+                return plan;
+            }
+            plan.steps.push_back(step({"hyprctl", "dispatch", "movewindow", "mon:" + action.target},
+                                      "move to " + action.target));
+            plan.ok = true;
             return plan;
         }
 
@@ -377,9 +412,25 @@ bool validateStep(const SExecStep& step, std::string& err) {
             }
             return true;
         }
-        if (a[2] == "workspace") {
+        if (a[2] == "movewindow") {
+            // `movewindow mon:<name>` ONLY. The directional form is not something this
+            // grammar can produce, and refusing it here keeps the shape trivially checkable.
+            if (a.size() != 4 || a[3].rfind("mon:", 0) != 0 || a[3].size() <= 4 || a[3].size() > 4 + 64) {
+                err = "movewindow must be `movewindow mon:<name>`";
+                return false;
+            }
+            for (size_t i = 4; i < a[3].size(); i++) {
+                const char c = a[3][i];
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_' && c != '.') {
+                    err = "movewindow monitor name has an unexpected character";
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (a[2] == "movetoworkspace" || a[2] == "workspace") {
             if (a.size() != 4 || a[3].empty() || a[3].size() > 2) {
-                err = "workspace must be `workspace <1-99>`";
+                err = a[2] + " must be `" + a[2] + " <1-99>`";
                 return false;
             }
             for (char c : a[3])

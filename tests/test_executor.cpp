@@ -149,7 +149,10 @@ TEST_CASE("executor: validateStep rejects anything outside the allowlist") {
     CHECK_FALSE(validateStep({{"hyprctl", "openxr", "destroy", "XR-code"}, ""}, err));
     // A dispatcher outside the closed set (killactive is deliberately absent).
     CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "killactive"}, ""}, err));
-    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "movetoworkspace", "5"}, ""}, err));
+    // `movetoworkspace` JOINED the allowlist in round 3 (it is how a window move reaches a
+    // workspace) — but only in its checked shape; `movetoworkspacesilent` did not.
+    CHECK(validateStep({{"hyprctl", "dispatch", "movetoworkspace", "5"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "movetoworkspacesilent", "5"}, ""}, err));
     // Control characters cannot ride an argv token.
     CHECK_FALSE(validateStep({{"hyprctl", "openxr", "select", "XR\ncode"}, ""}, err));
 }
@@ -300,4 +303,101 @@ TEST_CASE("executor: allow_window=false refuses every window verb") {
     CHECK_FALSE(planFor(ws, windowCtx(), off).ok);
     CHECK_FALSE(planFor(fo, windowCtx(), off).ok);
     CHECK_FALSE(planFor(fs, windowCtx(), off).ok);
+}
+
+// ---- window -> monitor / workspace moves (round 3) ---------------------------------
+
+namespace {
+    // Live windows + a real layout, so both halves of a move can be validated.
+    SDesktopContext moveCtx() {
+        const char* mons = R"json([
+            {"id":0,"name":"eDP-1","focused":true,"x":0,"y":0},
+            {"id":3,"name":"XR-code","x":1920,"y":0}
+        ])json";
+        const char* cls = R"json([
+            {"address":"0x2222","class":"kitty","title":"~","monitor":0,"mapped":true,"focusHistoryID":0}
+        ])json";
+        return SDesktopContext::parse(mons, cls, "");
+    }
+}
+
+TEST_CASE("executor: a window move focuses the window then moves it to the named monitor") {
+    SAction a;
+    a.verb          = EVerb::MoveWindow;
+    a.windowAddress = "0x2222";
+    a.windowLabel   = "kitty";
+    a.target        = "XR-code";
+    a.targetSource  = ETargetSource::Semantic;
+    SExecConfig cfg;
+    SExecPlan   p = planFor(a, moveCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 2);
+    CHECK(hasLine(p, "hyprctl dispatch focuswindow address:0x2222"));
+    CHECK(hasLine(p, "hyprctl dispatch movewindow mon:XR-code"));
+    for (auto& s : p.steps) {
+        std::string err;
+        CHECK_MESSAGE(validateStep(s, err), err);
+    }
+}
+
+TEST_CASE("executor: a move with no named window acts on the focused one") {
+    SAction a;
+    a.verb   = EVerb::MoveWindow;
+    a.target = "XR-code";
+    SExecPlan p = planFor(a, moveCtx(), SExecConfig{});
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 1);
+    CHECK(hasLine(p, "hyprctl dispatch movewindow mon:XR-code"));
+}
+
+TEST_CASE("executor: a workspace destination dispatches movetoworkspace") {
+    SAction a;
+    a.verb          = EVerb::MoveWindow;
+    a.windowAddress = "0x2222";
+    a.workspace     = 3;
+    SExecPlan p = planFor(a, moveCtx(), SExecConfig{});
+    REQUIRE(p.ok);
+    CHECK(hasLine(p, "hyprctl dispatch focuswindow address:0x2222"));
+    CHECK(hasLine(p, "hyprctl dispatch movetoworkspace 3"));
+}
+
+TEST_CASE("executor: a move refuses a dead window handle and a monitor that is not live") {
+    SAction stale;
+    stale.verb          = EVerb::MoveWindow;
+    stale.windowAddress = "0xdead";
+    stale.target        = "XR-code";
+    CHECK_FALSE(planFor(stale, moveCtx(), SExecConfig{}).ok);
+
+    SAction ghost;
+    ghost.verb   = EVerb::MoveWindow;
+    ghost.target = "XR-nowhere";
+    CHECK_FALSE(planFor(ghost, moveCtx(), SExecConfig{}).ok);
+
+    // "active" is not a destination: a move must know where it is going.
+    SAction vague;
+    vague.verb   = EVerb::MoveWindow;
+    vague.target = "active";
+    CHECK_FALSE(planFor(vague, moveCtx(), SExecConfig{}).ok);
+}
+
+TEST_CASE("executor: a move obeys allow_window like the rest of the window verbs") {
+    SAction a;
+    a.verb   = EVerb::MoveWindow;
+    a.target = "XR-code";
+    SExecConfig cfg;
+    cfg.allowWindow = false;
+    CHECK_FALSE(planFor(a, moveCtx(), cfg).ok);
+}
+
+TEST_CASE("executor: validateStep pins the shape of the two move dispatchers") {
+    std::string err;
+    CHECK(validateStep(SExecStep{{"hyprctl", "dispatch", "movewindow", "mon:XR-code"}, ""}, err));
+    CHECK(validateStep(SExecStep{{"hyprctl", "dispatch", "movetoworkspace", "12"}, ""}, err));
+    // No directional form, no bare name, no metacharacters, no out-of-range index.
+    CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movewindow", "l"}, ""}, err));
+    CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movewindow", "XR-code"}, ""}, err));
+    CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movewindow", "mon:XR code; rm -rf"}, ""}, err));
+    CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movewindow", "mon:"}, ""}, err));
+    CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movetoworkspace", "0"}, ""}, err));
+    CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movetoworkspace", "abc"}, ""}, err));
 }

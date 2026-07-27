@@ -307,3 +307,152 @@ TEST_CASE("intent: a bare trailing fragment stays rejected, never guessed") {
     // And the negative control from the live round: ordinary speech is not a command.
     CHECK(eng.detect(mk("I wonder what's for dinner")).verb == EVerb::None);
 }
+
+// ---- window -> monitor / workspace moves (round 3) ---------------------------------
+//
+// "Move terminal to the left monitor." transcribed PERFECTLY during live round 3 and
+// still came back intent=none: the grammar had no verb for relocating a window. The
+// destination half is the interesting part — a spoken "the left monitor" is a claim
+// about the LAYOUT, so it resolves against monitor geometry, never against a name.
+
+namespace {
+    // Three outputs in a row, with the x coordinates `hyprctl monitors -j` reports.
+    SDesktopContext spatialFixture() {
+        const char* mons = R"json([
+            {"id":0,"name":"eDP-1","focused":true,"x":0,"y":0,"width":1920,"height":1080},
+            {"id":3,"name":"XR-code","x":1920,"y":0,"width":2560,"height":1440},
+            {"id":4,"name":"XR-web","x":4480,"y":0,"width":2560,"height":1440}
+        ])json";
+        const char* cls = R"json([
+            {"address":"0x1111","class":"firefox","title":"YouTube - Mozilla Firefox",
+             "monitor":4,"mapped":true,"focusHistoryID":1},
+            {"address":"0x2222","class":"nvim","title":"main.cpp - NVIM",
+             "monitor":3,"mapped":true,"focusHistoryID":0},
+            {"address":"0x3333","class":"kitty","title":"~",
+             "monitor":0,"mapped":true,"focusHistoryID":2}
+        ])json";
+        return SDesktopContext::parse(mons, cls, "");
+    }
+}
+
+TEST_CASE("intent: 'move terminal to the left monitor' parses into both halves") {
+    CRuleIntent eng(icfg());
+    SRawIntent r = eng.detect(mk("Move terminal to the left monitor."));
+    CHECK(r.verb == EVerb::MoveWindow);
+    CHECK(r.windowPhrase == "terminal");
+    CHECK(r.spatial == ESpatialRef::Left);
+    CHECK(r.monitorPhrase.empty());
+}
+
+TEST_CASE("intent: the spoken move phrasings all resolve to a live window and a live monitor") {
+    CRuleIntent eng(icfg());
+    struct { const char* text; const char* addr; const char* mon; } cases[] = {
+        {"move terminal to the left monitor",        "0x3333", "eDP-1"},
+        {"send the browser to the right monitor",    "0x1111", "XR-web"},
+        {"put the editor on the left screen",        "0x2222", "eDP-1"},
+        {"move the browser over to the right",       "0x1111", "XR-web"},
+        {"send firefox to the leftmost display",     "0x1111", "eDP-1"},
+    };
+    for (auto& c : cases) {
+        INFO("phrase: ", c.text);
+        SAction a = eng.resolve(mk(c.text), spatialFixture(), noGaze);
+        CHECK(a.verb == EVerb::MoveWindow);
+        CHECK(a.windowAddress == c.addr);
+        CHECK(a.target == c.mon);
+        CHECK(a.workspace == 0);
+    }
+}
+
+TEST_CASE("intent: a named destination monitor resolves semantically") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move the browser to the coding monitor"), spatialFixture(), noGaze);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress == "0x1111");
+    CHECK(a.target == "XR-code");
+}
+
+TEST_CASE("intent: 'move this to the left monitor' moves the FOCUSED window") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move this window to the left monitor"), spatialFixture(), noGaze);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress.empty()); // empty == "whatever is focused"
+    CHECK(a.target == "eDP-1");
+}
+
+TEST_CASE("intent: '…to this monitor' takes the destination from the gaze ring") {
+    CRuleIntent eng(icfg());
+    GazeQueryFn q = [](int64_t at) {
+        char b[320];
+        std::snprintf(b, sizeof(b),
+                      R"json({"ok":true,"viewValid":true,"timestampMs":%lld,
+                      "head":{"pos":[0,1.4,0],"forward":[0,0,-1]},
+                      "gaze":{"monitorId":3,"name":"XR-code","selected":true,"dwellSec":0.4},
+                      "query":{"matchedTimestampMs":%lld,"ageMs":0}})json",
+                      (long long)at, (long long)at);
+        return std::string(b);
+    };
+    SAction a = eng.resolve(mk("move the browser to this monitor"), spatialFixture(), q);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress == "0x1111");
+    CHECK(a.target == "XR-code");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+}
+
+TEST_CASE("intent: a workspace destination is a MOVE, not a workspace switch") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move the browser to workspace three"), spatialFixture(), noGaze);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress == "0x1111");
+    CHECK(a.workspace == 3);
+    CHECK(a.target.empty());
+
+    // …while the bare switch keeps its own verb.
+    CHECK(eng.detect(mk("go to workspace three")).verb == EVerb::Workspace);
+    // "move to workspace three" names no window, so it stays a switch rather than
+    // silently relocating whatever happened to be focused.
+    CHECK(eng.detect(mk("move to workspace three")).verb == EVerb::Workspace);
+}
+
+TEST_CASE("intent: a move with no number for its workspace asks") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move the browser to the workspace"), spatialFixture(), noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+}
+
+TEST_CASE("intent: 'the left monitor' is refused when the layout cannot answer") {
+    CRuleIntent eng(icfg());
+    // One monitor: nothing is "the left one".
+    SDesktopContext solo = SDesktopContext::parse(
+        R"json([{"id":0,"name":"eDP-1","focused":true,"x":0}])json",
+        R"json([{"address":"0x3333","class":"kitty","title":"~","monitor":0,"mapped":true,"focusHistoryID":0}])json",
+        "");
+    SAction a = eng.resolve(mk("move the terminal to the left monitor"), solo, noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+
+    // Two monitors stacked at the SAME x: "left" is genuinely ambiguous, so ask.
+    SDesktopContext stacked = SDesktopContext::parse(
+        R"json([{"id":0,"name":"DP-1","x":0,"y":0},{"id":1,"name":"DP-2","x":0,"y":1080}])json",
+        R"json([{"address":"0x3333","class":"kitty","title":"~","monitor":0,"mapped":true,"focusHistoryID":0}])json",
+        "");
+    SAction b = eng.resolve(mk("move the terminal to the left monitor"), stacked, noGaze);
+    CHECK(b.verb == EVerb::Clarify);
+    CHECK(b.clarifyCandidates.size() == 2);
+}
+
+TEST_CASE("intent: a destination we cannot see asks rather than moving the window anywhere") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move the browser to the gaming monitor"), spatialFixture(), noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.target.empty());
+}
+
+TEST_CASE("intent: the move grammar declines anything that is not one") {
+    CRuleIntent eng(icfg());
+    // A destination must announce itself as an output or a workspace. Without that
+    // "move this closer to me" would parse as a move-to-"me".
+    CHECK(eng.detect(mk("move this closer to me")).verb == EVerb::MoveDist);
+    CHECK(eng.detect(mk("move the coding monitor closer")).verb == EVerb::MoveDist);
+    CHECK(eng.detect(mk("put the editor here")).verb == EVerb::Place);
+    CHECK(eng.detect(mk("bring it closer")).verb == EVerb::MoveDist);
+    CHECK(eng.detect(mk("push it further away")).verb == EVerb::MoveDist);
+}

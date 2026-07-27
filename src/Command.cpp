@@ -22,6 +22,7 @@ const char* verbName(EVerb v) {
         case EVerb::Focus:      return "focus";
         case EVerb::Fullscreen: return "fullscreen";
         case EVerb::Workspace:  return "workspace";
+        case EVerb::MoveWindow: return "move_window";
     }
     return "?";
 }
@@ -42,6 +43,7 @@ EVerb verbFromName(const std::string& s) {
     if (s == "focus")      return EVerb::Focus;
     if (s == "fullscreen") return EVerb::Fullscreen;
     if (s == "workspace")  return EVerb::Workspace;
+    if (s == "move_window") return EVerb::MoveWindow;
     return EVerb::None;
 }
 
@@ -151,7 +153,7 @@ std::string SAction::toJson() const {
         o += ",\"windowLabel\":";
         appendEscaped(o, windowLabel);
     }
-    if (verb == EVerb::Workspace)
+    if (verb == EVerb::Workspace || (verb == EVerb::MoveWindow && workspace > 0))
         o += ",\"workspace\":" + std::to_string(workspace);
     o += ",\"confidence\":" + num(confidence, "%.2f");
     if (verb == EVerb::Clarify) {

@@ -92,6 +92,10 @@ SDesktopContext SDesktopContext::parse(const std::string& monitorsJson,
                     info.name    = jstr(m, "name");
                     info.id      = jint(m, "id", -1);
                     info.focused = jbool(m, "focused");
+                    info.x       = jint(m, "x", 0);
+                    info.y       = jint(m, "y", 0);
+                    info.width   = jint(m, "width", 0);
+                    info.height  = jint(m, "height", 0);
                     info.xr      = info.name.rfind("XR-", 0) == 0;
                     if (json_t* aw = json_object_get(m, "activeWorkspace"); aw && json_is_object(aw))
                         info.workspace = jstr(aw, "name");
@@ -210,6 +214,38 @@ bool SDesktopContext::hasWindow(const std::string& address) const {
         if (w.address == address)
             return true;
     return false;
+}
+
+SMonitorMatch SDesktopContext::resolveSpatialMonitor(ESpatialRef ref) const {
+    SMonitorMatch res;
+    if (ref == ESpatialRef::None || monitors.size() < 2)
+        return res; // nothing to be to the left OF
+
+    std::vector<const SMonitorInfo*> byX;
+    byX.reserve(monitors.size());
+    for (auto& m : monitors)
+        byX.push_back(&m);
+    // stable_sort so equal-x monitors keep snapshot order — the tie is reported, not
+    // silently broken by whatever std::sort happened to do.
+    std::stable_sort(byX.begin(), byX.end(),
+                     [](const SMonitorInfo* a, const SMonitorInfo* b) { return a->x < b->x; });
+
+    const SMonitorInfo* pick = ref == ESpatialRef::Left ? byX.front() : byX.back();
+    std::vector<std::string> tied;
+    for (auto* m : byX)
+        if (m->x == pick->x)
+            tied.push_back(m->name);
+
+    res.matched = true;
+    res.name    = pick->name;
+    if (tied.size() > 1) {
+        res.confidence = 0.4;
+        res.candidates = tied;
+    } else {
+        // Two monitors side by side is the unambiguous case the user actually has.
+        res.confidence = monitors.size() == 2 ? 0.95 : 0.8;
+    }
+    return res;
 }
 
 const SMonitorInfo* SDesktopContext::hoveredMonitor() const {

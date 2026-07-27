@@ -34,7 +34,8 @@ namespace Grammar {
              "\"\\\"place\\\"\" | \"\\\"move_dist\\\"\" | \"\\\"center\\\"\" | "
              "\"\\\"dock\\\"\" | \"\\\"undock\\\"\" | \"\\\"follow\\\"\" | "
              "\"\\\"anchor\\\"\" | \"\\\"hand_input\\\"\" | \"\\\"launch_app\\\"\" | "
-             "\"\\\"focus\\\"\" | \"\\\"fullscreen\\\"\" | \"\\\"workspace\\\"\"\n";
+             "\"\\\"focus\\\"\" | \"\\\"fullscreen\\\"\" | \"\\\"workspace\\\"\" | "
+             "\"\\\"move_window\\\"\"\n";
 
         // target: one of the live monitor names, else "active" or "".
         g += "target ::= \"\\\"active\\\"\" | \"\\\"\\\"\"";

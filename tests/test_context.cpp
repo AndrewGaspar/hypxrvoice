@@ -303,3 +303,52 @@ TEST_CASE("context: a genuinely ambiguous reference reports both apps") {
     REQUIRE(b.matched);
     CHECK(b.candidates.empty());
 }
+
+// ---- spatial monitor references (round 3) ------------------------------------------
+
+TEST_CASE("context: 'the left/right monitor' resolves against the layout, not the name") {
+    // Deliberately named so that a name-based guess would get it BACKWARDS: the monitor
+    // called "XR-left" sits on the right.
+    SDesktopContext c = SDesktopContext::parse(
+        R"json([
+            {"id":0,"name":"XR-right","x":0,"y":0,"width":1920,"height":1080},
+            {"id":1,"name":"XR-left","x":1920,"y":0,"width":1920,"height":1080}
+        ])json",
+        "", "");
+    REQUIRE(c.monitors.size() == 2);
+    CHECK(c.find("XR-right")->x == 0);
+
+    SMonitorMatch l = c.resolveSpatialMonitor(ESpatialRef::Left);
+    REQUIRE(l.matched);
+    CHECK(l.name == "XR-right");
+    CHECK(l.candidates.empty());
+    CHECK(l.confidence > 0.9);
+
+    SMonitorMatch r = c.resolveSpatialMonitor(ESpatialRef::Right);
+    REQUIRE(r.matched);
+    CHECK(r.name == "XR-left");
+}
+
+TEST_CASE("context: a spatial reference with nothing to compare against is unmatched") {
+    SDesktopContext solo = SDesktopContext::parse(R"json([{"id":0,"name":"eDP-1","x":0}])json", "", "");
+    CHECK_FALSE(solo.resolveSpatialMonitor(ESpatialRef::Left).matched);
+    CHECK_FALSE(solo.resolveSpatialMonitor(ESpatialRef::None).matched);
+}
+
+TEST_CASE("context: monitors stacked at the same x make 'left' ambiguous, not arbitrary") {
+    SDesktopContext c = SDesktopContext::parse(
+        R"json([
+            {"id":0,"name":"DP-1","x":0,"y":0},
+            {"id":1,"name":"DP-2","x":0,"y":1080},
+            {"id":2,"name":"DP-3","x":2560,"y":0}
+        ])json",
+        "", "");
+    SMonitorMatch l = c.resolveSpatialMonitor(ESpatialRef::Left);
+    REQUIRE(l.matched);
+    CHECK(l.candidates.size() == 2);
+    CHECK(l.confidence < 0.5);
+    // The right edge is unique, so it still answers cleanly.
+    SMonitorMatch r = c.resolveSpatialMonitor(ESpatialRef::Right);
+    CHECK(r.name == "DP-3");
+    CHECK(r.candidates.empty());
+}

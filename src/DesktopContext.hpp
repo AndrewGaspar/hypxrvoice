@@ -14,10 +14,20 @@
 //                          post-parse validator that rejects an invented target.
 // Parsing is pure over JSON strings (testable with fixtures, no live compositor).
 
+// Where a spoken "the LEFT monitor" / "the RIGHT monitor" points. Resolved against the
+// live layout geometry, never against a name — the user is describing what they can see.
+enum class ESpatialRef { None, Left, Right };
+
 struct SMonitorInfo {
     std::string name;          // e.g. "XR-code" — the enumerated target token.
     int         id       = -1;
     bool        focused  = false;
+    // Layout position, straight from `hyprctl monitors -j`. This is what makes "the left
+    // monitor" resolvable: leftmost/rightmost by x, with no guessing from names.
+    int         x        = 0;
+    int         y        = 0;
+    int         width    = 0;
+    int         height   = 0;
     bool        xr       = false;   // an XR monitor (name XR-* or present in openxr status).
     std::string anchorMode;         // "local"|"head"|"body"|... (XR only).
     bool        hovered  = false;   // ray-hovered right now (deixis hint).
@@ -81,6 +91,13 @@ struct SDesktopContext {
     // Is this window handle live right now? The executor's last check before it
     // dispatches at an address, so a stale handle is refused instead of actuated.
     bool                     hasWindow(const std::string& address) const;
+
+    // Resolve "the left/right monitor" against the LAYOUT: leftmost / rightmost by x.
+    // Unmatched when there are fewer than two monitors (nothing is "the left one" when
+    // there is only one). When two monitors share the extreme x the answer is genuinely
+    // ambiguous, so `candidates` is filled and confidence drops — the caller turns that
+    // into a Clarify rather than picking.
+    SMonitorMatch resolveSpatialMonitor(ESpatialRef ref) const;
 
     // The single ray-hovered monitor, if exactly one (a cheap deixis fallback when
     // gaze history is unavailable). Null otherwise.

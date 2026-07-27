@@ -72,6 +72,16 @@ namespace {
         return std::stoi(tok);
     }
 
+    // Determiners and fillers that carry no identity in a destination phrase.
+    bool isDeterminer(const std::string& t) {
+        return t == "the" || t == "a" || t == "an" || t == "my" || t == "our";
+    }
+
+    // Words that say "the thing I am naming is an output", not part of its name.
+    bool isMonitorNoun(const std::string& t) {
+        return t == "monitor" || t == "screen" || t == "display";
+    }
+
     // Find `joined` in `toks`, tolerating the ASR splitting the compound ("work space",
     // "full screen" — both show up often enough that matching only the joined form loses
     // the command outright). Returns the index just PAST the match, or -1.
@@ -84,6 +94,93 @@ namespace {
                 return static_cast<int>(i) + 2;
         }
         return -1;
+    }
+
+    // "move/put/send <window> to <destination>" — the one command that names a WINDOW and
+    // a place to put it. Returns true only when BOTH halves parsed; the caller then treats
+    // the utterance as a window move and skips the rest of the keyword chain.
+    //
+    // The destination must announce itself as an output or a workspace: a monitor noun
+    // ("monitor"/"screen"/"display"), a spatial word ("left"/"right"), or "workspace".
+    // Without that requirement "move this closer to me" parses as a move-to-"me", which
+    // is exactly the kind of confident nonsense the closed grammar exists to prevent.
+    bool parseWindowMove(const std::vector<std::string>& toks, SRawIntent& r) {
+        static const char* kVerbs[] = {"move", "put", "send", "throw", "drag", "shift"};
+        size_t vi = toks.size();
+        for (size_t i = 0; i < toks.size() && vi == toks.size(); i++)
+            for (auto* v : kVerbs)
+                if (toks[i] == v) { vi = i; break; }
+        if (vi == toks.size())
+            return false;
+
+        // The preposition that introduces the destination.
+        size_t pi = toks.size();
+        for (size_t i = vi + 1; i < toks.size(); i++)
+            if (toks[i] == "to" || toks[i] == "onto" || toks[i] == "on" || toks[i] == "over") {
+                pi = i;
+                break;
+            }
+        if (pi == toks.size())
+            return false;
+        size_t d = pi + 1;
+        if (d < toks.size() && toks[d] == "to")
+            d++; // "over to the left monitor"
+        if (d >= toks.size())
+            return false;
+
+        // The window half. REQUIRED: a bare "move to workspace 3" is a workspace SWITCH,
+        // and guessing that it meant the focused window would silently relocate it.
+        std::string win;
+        for (size_t i = vi + 1; i < pi; i++) {
+            if (!win.empty()) win += ' ';
+            win += toks[i];
+        }
+        if (win.empty())
+            return false;
+
+        std::vector<std::string> dest(toks.begin() + static_cast<long>(d), toks.end());
+        while (!dest.empty() && isDeterminer(dest.front()))
+            dest.erase(dest.begin());
+        if (dest.empty())
+            return false;
+
+        // A workspace destination: "…to workspace three". No number is underspecified,
+        // not out of scope — finalize turns that into a Clarify.
+        if (int wsAt = findCompound(dest, "workspace", "work", "space"); wsAt >= 0) {
+            int idx = -1;
+            for (size_t i = static_cast<size_t>(wsAt); i < dest.size(); i++)
+                if (int n = cardinal(dest[i]); n >= 0) { idx = n; break; }
+            r.windowPhrase = win;
+            r.sub          = "workspace";
+            r.workspace    = idx >= 0 ? idx : 0;
+            return true;
+        }
+
+        // A spatial destination: "…to the left", "…to the right monitor".
+        if (dest.front() == "left" || dest.front() == "leftmost")
+            r.spatial = ESpatialRef::Left;
+        else if (dest.front() == "right" || dest.front() == "rightmost")
+            r.spatial = ESpatialRef::Right;
+        if (r.spatial != ESpatialRef::None) {
+            r.windowPhrase = win;
+            return true;
+        }
+
+        // Anything else must still SAY it is an output; the phrase then resolves
+        // semantically (a live name) or, for "…to this monitor", through the gaze ring.
+        bool named = false;
+        for (auto& t : dest)
+            if (isMonitorNoun(t)) { named = true; break; }
+        if (!named)
+            return false;
+        std::string mon;
+        for (auto& t : dest) {
+            if (!mon.empty()) mon += ' ';
+            mon += t;
+        }
+        r.windowPhrase  = win;
+        r.monitorPhrase = mon;
+        return true;
     }
 }
 
@@ -158,6 +255,16 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
     const std::vector<std::string> toks = words(t.text);
     const int wsAt = findCompound(toks, "workspace", "work", "space");
     const int fsAt = findCompound(toks, "fullscreen", "full", "screen");
+
+    // Window MOVES are checked first: they are the only shape that names a window AND a
+    // destination, and both "workspace" and the XR distance verbs would otherwise swallow
+    // one ("move the terminal to workspace three" is not a workspace switch). The parse
+    // is strict enough to decline anything that is not actually a move (see parseWindowMove),
+    // so falling through costs nothing.
+    if (parseWindowMove(toks, r)) {
+        setVerb(EVerb::MoveWindow, "window-move keyword");
+        return r; // the spans are already split; the generic phrase builder must not run
+    }
 
     // "workspace three" / "go to workspace 3" / "switch to workspace three". The
     // "workspace" token is REQUIRED: a bare trailing "3." (which is exactly what the
@@ -308,6 +415,88 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
     const bool wantDeixis = raw.deictic && (!sem.matched || sem.confidence < 0.6);
     if (wantDeixis && gazeQuery)
         gz = resolveDeixis(raw.deicticWordMs, cfg.gaze, gazeQuery, &ctx);
+
+    // MoveWindow names BOTH: a window to relocate and a place to put it. The two halves
+    // resolve against different live lists, and either half being ambiguous is a Clarify —
+    // moving the wrong window, or moving the right one somewhere unexpected, are both
+    // annoying to undo in a headset.
+    if (raw.verb == EVerb::MoveWindow) {
+        a.targetSource = ETargetSource::None;
+
+        // 1. WHICH window. Content-first, exactly like focus/fullscreen. Nothing named
+        //    (or nothing matched) leaves the address empty, which the executor reads as
+        //    "the focused window" — the right meaning of "move this to the left monitor".
+        SWindowMatch win;
+        if (!raw.windowPhrase.empty())
+            win = ctx.resolveWindow(raw.windowPhrase);
+        if (win.matched && win.candidates.size() > 1) {
+            a.verb              = EVerb::Clarify;
+            a.clarifyQuestion   = "which one?";
+            a.clarifyCandidates = win.candidates;
+            a.confidence        = 0.4;
+            return a;
+        }
+        if (win.matched) {
+            a.windowAddress = win.address;
+            a.windowLabel   = win.label;
+            a.confidence    = std::min(a.confidence, win.confidence);
+        }
+
+        // 2a. A WORKSPACE destination needs an index and nothing else.
+        if (raw.sub == "workspace") {
+            a.sub       = "";
+            a.workspace = raw.workspace;
+            if (a.workspace < 1 || a.workspace > 99) {
+                a.verb            = EVerb::Clarify;
+                a.clarifyQuestion = "which workspace?";
+                a.confidence      = 0.3;
+            }
+            return a;
+        }
+
+        // 2b. A MONITOR destination: spatial (layout), then named/semantic, then deixis.
+        SMonitorMatch mon;
+        if (raw.spatial != ESpatialRef::None) {
+            mon = ctx.resolveSpatialMonitor(raw.spatial);
+            if (!mon.matched) {
+                a.verb            = EVerb::Clarify;
+                a.clarifyQuestion = "which monitor?";
+                a.confidence      = 0.3;
+                return a;
+            }
+        } else if (!raw.monitorPhrase.empty()) {
+            mon = ctx.resolveMonitor(raw.monitorPhrase);
+        }
+        if (mon.matched && mon.candidates.size() > 1) {
+            a.verb              = EVerb::Clarify;
+            a.clarifyQuestion   = "which monitor?";
+            a.clarifyCandidates = mon.candidates;
+            a.confidence        = 0.4;
+            return a;
+        }
+        if (mon.matched) {
+            a.target       = mon.name;
+            a.targetSource = raw.spatial != ESpatialRef::None ? ETargetSource::Semantic
+                                                              : ETargetSource::Named;
+            a.confidence   = std::min(a.confidence, mon.confidence);
+            return a;
+        }
+        // "…to this monitor": the destination is wherever the user was looking.
+        if (gz.valid && !gz.name.empty() && ctx.hasMonitor(gz.name)) {
+            a.target       = gz.name;
+            a.targetSource = ETargetSource::Deixis;
+            a.gaze         = gz;
+            a.confidence   = gz.stable ? std::min(a.confidence, 0.9) : 0.6;
+            return a;
+        }
+        // Named a destination we cannot see. Ask; never fall back to "active" here — the
+        // window would move somewhere the user did not ask for.
+        a.verb            = EVerb::Clarify;
+        a.clarifyQuestion = raw.monitorPhrase.empty() ? "move it where?"
+                                                      : "I don't see " + raw.monitorPhrase;
+        a.confidence      = 0.3;
+        return a;
+    }
 
     // Focus/Fullscreen name a WINDOW, not a monitor, so they resolve against the live
     // window list instead of the monitor list. Content-first, exactly as everywhere else:

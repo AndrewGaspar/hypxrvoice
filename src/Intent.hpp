@@ -37,6 +37,14 @@ struct SRawIntent {
     double      deltaM = 0.0;
     int         workspace = 0;          // Workspace: the index parsed from the utterance.
     std::string appPhrase;              // LaunchApp: spoken app words.
+    // MoveWindow ("move terminal to the left monitor"): the two halves of the phrase,
+    // kept apart because they resolve against DIFFERENT live lists — the window against
+    // `clients -j`, the destination against `monitors -j`. `spatial` carries a
+    // left/right reference, which resolves against the layout rather than any name; a
+    // `sub` of "workspace" marks a workspace destination (the index rides in `workspace`).
+    std::string windowPhrase;           // spoken window reference ("the browser").
+    std::string monitorPhrase;          // spoken monitor reference ("the coding monitor").
+    ESpatialRef spatial = ESpatialRef::None;
     double      confidence = 1.0;
     std::string note;
 };

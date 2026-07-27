@@ -45,7 +45,16 @@ SRawIntent CLlamaIntent::parseRaw(const std::string& json, int64_t deicticMs, bo
     std::string app    = jstr(root, "app");
     if (r.verb == EVerb::LaunchApp)
         r.appPhrase = app.empty() ? target : app;
-    else if (r.verb == EVerb::Focus || r.verb == EVerb::Fullscreen)
+    else if (r.verb == EVerb::MoveWindow) {
+        // A move names BOTH halves: the window rides in the free-text `app` field, the
+        // destination in the enumerated `target`. A workspace destination is signalled by
+        // a non-zero `workspace`, exactly as the rule backend marks it.
+        r.windowPhrase = app;
+        if (target != "active" && !target.empty())
+            r.monitorPhrase = target;
+        if (r.workspace > 0)
+            r.sub = "workspace";
+    } else if (r.verb == EVerb::Focus || r.verb == EVerb::Fullscreen)
         // Window verbs name an APP, and the grammar's `target` enumerates MONITORS —
         // so the free-text `app` field is the carrier. finalize resolves it against the
         // live window list, which is what keeps an invented name from actuating.
@@ -77,6 +86,9 @@ std::string CLlamaIntent::buildPrompt(const STranscript& t, const SDesktopContex
          "workspace — put the number in `workspace`).\n";
     p += "For focus/fullscreen put the spoken app name in `app` (e.g. \"browser\"), not "
          "in `target`.\n";
+    p += "move_window relocates ONE window (\"move the terminal to the left monitor\"): "
+         "put the spoken window name in `app` and the destination monitor in `target`, or "
+         "set `workspace` when the destination is a workspace.\n";
     p += "target MUST be one of the monitor names below, or \"active\" for "
          "this/that/selected, or \"\".\n";
     p += "Set deictic=true when the user says \"this\"/\"that\"; place=true for "
