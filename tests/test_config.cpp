@@ -94,3 +94,27 @@ TEST_CASE("config: the capture knobs parse") {
     CHECK_FALSE(c.capture.hold);
     CHECK(c.capture.preRollMs == 450);
 }
+
+TEST_CASE("config: the onset back-pad and the debug dump knobs parse") {
+    const char* doc = "[vad]\nonset_backpad_ms = 420\n"
+                      "[executor]\nallow_window = false\n"
+                      "[debug]\ndump_audio_dir = \"/tmp/hypxrvoice-dumps\"\ndump_audio_keep = 12\n";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    REQUIRE(parseConfig(doc, c, errs, warns));
+    CHECK(errs.empty());
+    CHECK(warns.empty());
+    CHECK(c.vad.onsetBackpadMs == 420);
+    CHECK_FALSE(c.executor.allowWindow);
+    CHECK(c.debug.dumpAudioDir == "/tmp/hypxrvoice-dumps");
+    CHECK(c.debug.dumpAudioKeep == 12);
+}
+
+TEST_CASE("config: audio dumping is OFF and window control is ON by default") {
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    REQUIRE(parseConfig("", c, errs, warns));
+    CHECK(c.debug.dumpAudioDir.empty()); // never writes mic audio unless asked
+    CHECK(c.vad.onsetBackpadMs == 300);
+    CHECK(c.executor.allowWindow);
+}

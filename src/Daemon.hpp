@@ -3,6 +3,7 @@
 #include "ActivationMachine.hpp"
 #include "Asr.hpp"
 #include "AudioCapture.hpp"
+#include "AudioDump.hpp"
 #include "Compositor.hpp"
 #include "Config.hpp"
 #include "ControlSocket.hpp"
@@ -70,6 +71,7 @@ class CDaemon {
 
     void resetVad();
     void loadIntentBackend(); // (re)load the llama backend per config; rule fallback.
+    void applyDumpConfig();   // (re)apply debug.dump_audio_dir; warns while it is on.
 
     SConfig            m_cfg;
     std::string        m_configPath;
@@ -92,6 +94,10 @@ class CDaemon {
     // Frames arriving while the gate is shut land here and nowhere else; spliced onto
     // the front of the next window so speech that started before the PTT press survives.
     CPreRollRing m_preRoll;
+
+    // Opt-in capture forensics (debug.dump_audio_dir). Disabled — and inert — unless the
+    // operator sets a directory; see AudioDump.hpp for what it answers and why.
+    CAudioDump m_dump;
 
     SEnvSignal m_env{};
     int64_t    m_lastPollMs   = 0;

@@ -52,3 +52,28 @@ bool loadAudioMono16k(const std::string& path, std::vector<float>& out, std::str
     }
     return true;
 }
+
+bool writeWavMono16(const std::string& path, const std::vector<float>& samples,
+                    int sampleRate, std::string& err) {
+    SF_INFO info{};
+    info.samplerate = sampleRate > 0 ? sampleRate : 16000;
+    info.channels   = 1;
+    info.format     = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+
+    SNDFILE* f = sf_open(path.c_str(), SFM_WRITE, &info);
+    if (!f) {
+        err = std::string("sf_open('") + path + "', write) failed: " + sf_strerror(nullptr);
+        return false;
+    }
+    // libsndfile scales float [-1,1] to the 16-bit range for us. Clipping is desirable
+    // here: a dump that clips is telling the truth about a hot source.
+    sf_count_t wrote = samples.empty()
+                           ? 0
+                           : sf_write_float(f, samples.data(), static_cast<sf_count_t>(samples.size()));
+    sf_close(f);
+    if (wrote != static_cast<sf_count_t>(samples.size())) {
+        err = "short write to '" + path + "'";
+        return false;
+    }
+    return true;
+}

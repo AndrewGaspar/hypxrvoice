@@ -67,6 +67,7 @@ add_library(hypxrvoice_core STATIC
     src/WakeWord.cpp
     src/Asr.cpp
     src/Wav.cpp
+    src/AudioDump.cpp
     src/Compositor.cpp
     src/AudioCapture.cpp
     src/ControlSocket.cpp
@@ -126,6 +127,7 @@ add_executable(hypxrvoice_tests
     tests/test_config.cpp
     tests/test_vad.cpp
     tests/test_preroll.cpp
+    tests/test_dump.cpp
     tests/test_wakeword.cpp
     tests/test_transcript.cpp
     tests/test_compositor.cpp
