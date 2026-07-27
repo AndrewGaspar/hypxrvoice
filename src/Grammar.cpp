@@ -26,13 +26,15 @@ namespace Grammar {
         g += "\"\\\"anchor\\\":\" ws anchor \",\" ws ";
         g += "\"\\\"sub\\\":\" ws sub \",\" ws ";
         g += "\"\\\"deltaM\\\":\" ws number \",\" ws ";
+        g += "\"\\\"workspace\\\":\" ws number \",\" ws ";
         g += "\"\\\"app\\\":\" ws str \",\" ws ";
         g += "\"\\\"confidence\\\":\" ws number ws \"}\"\n";
 
         g += "verb ::= \"\\\"none\\\"\" | \"\\\"clarify\\\"\" | \"\\\"pick\\\"\" | "
              "\"\\\"place\\\"\" | \"\\\"move_dist\\\"\" | \"\\\"center\\\"\" | "
              "\"\\\"dock\\\"\" | \"\\\"undock\\\"\" | \"\\\"follow\\\"\" | "
-             "\"\\\"anchor\\\"\" | \"\\\"hand_input\\\"\" | \"\\\"launch_app\\\"\"\n";
+             "\"\\\"anchor\\\"\" | \"\\\"hand_input\\\"\" | \"\\\"launch_app\\\"\" | "
+             "\"\\\"focus\\\"\" | \"\\\"fullscreen\\\"\" | \"\\\"workspace\\\"\"\n";
 
         // target: one of the live monitor names, else "active" or "".
         g += "target ::= \"\\\"active\\\"\" | \"\\\"\\\"\"";

@@ -147,10 +147,39 @@ TEST_CASE("executor: validateStep rejects anything outside the allowlist") {
     CHECK_FALSE(validateStep({{"rm", "-rf", "/"}, ""}, err));
     // An openxr verb outside the closed set (e.g. destroy is deliberately absent).
     CHECK_FALSE(validateStep({{"hyprctl", "openxr", "destroy", "XR-code"}, ""}, err));
-    // dispatch that isn't `exec --`.
-    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "workspace", "5"}, ""}, err));
+    // A dispatcher outside the closed set (killactive is deliberately absent).
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "killactive"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "movetoworkspace", "5"}, ""}, err));
     // Control characters cannot ride an argv token.
     CHECK_FALSE(validateStep({{"hyprctl", "openxr", "select", "XR\ncode"}, ""}, err));
+}
+
+// The window-management dispatchers added in round 2 are permitted, but only in the
+// exact argument SHAPES the planner emits — this is the last line of defence, so it is
+// asserted independently of how the planner happens to build them today.
+TEST_CASE("executor: validateStep pins the shape of every window dispatcher") {
+    std::string err;
+
+    CHECK(validateStep({{"hyprctl", "dispatch", "workspace", "3"}, ""}, err));
+    CHECK(validateStep({{"hyprctl", "dispatch", "workspace", "42"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "workspace", "0"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "workspace", "100"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "workspace", "3a"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "workspace"}, ""}, err));
+
+    CHECK(validateStep({{"hyprctl", "dispatch", "fullscreen", "0"}, ""}, err));
+    CHECK(validateStep({{"hyprctl", "dispatch", "fullscreen", "1"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "fullscreen", "2"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "fullscreen"}, ""}, err));
+
+    CHECK(validateStep({{"hyprctl", "dispatch", "focuswindow", "address:0x55f0abcd"}, ""}, err));
+    // `class:` is a REGEX in Hyprland — never permitted, whatever it contains.
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "focuswindow", "class:firefox"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "focuswindow", "address:0xzz"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "focuswindow", "address:0x"}, ""}, err));
+
+    CHECK(validateStep({{"hyprctl", "dispatch", "focusmonitor", "XR-code"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "focusmonitor", "XR code; rm -rf /"}, ""}, err));
 }
 
 TEST_CASE("executor: dry-run runs nothing; live run records exact argv") {
@@ -172,4 +201,103 @@ TEST_CASE("executor: dry-run runs nothing; live run records exact argv") {
     CHECK(nl == 1);
     REQUIRE(recorded.size() == 1);
     CHECK(recorded[0] == std::vector<std::string>{"hyprctl", "openxr", "anchor", "XR-code", "head"});
+}
+
+// ---- window management (round 2) --------------------------------------------------
+
+namespace {
+    // A snapshot with real clients, so the window verbs have live addresses to resolve.
+    SDesktopContext windowCtx() {
+        const char* mons = R"json([
+            {"id":3,"name":"XR-code"},{"id":4,"name":"XR-web"}
+        ])json";
+        const char* cls = R"json([
+            {"address":"0x55f0aaaa","class":"firefox","title":"YouTube - Mozilla Firefox",
+             "monitor":4,"mapped":true,"focusHistoryID":1},
+            {"address":"0x55f0bbbb","class":"nvim","title":"main.cpp - NVIM",
+             "monitor":3,"mapped":true,"focusHistoryID":0}
+        ])json";
+        return SDesktopContext::parse(mons, cls, "");
+    }
+}
+
+TEST_CASE("executor: workspace switches with a number WE formatted") {
+    SAction a; a.verb = EVerb::Workspace; a.workspace = 3;
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 1);
+    CHECK(hasLine(p, "hyprctl dispatch workspace 3"));
+}
+
+TEST_CASE("executor: an out-of-range workspace is refused, never clamped") {
+    SAction a; a.verb = EVerb::Workspace; a.workspace = 0;
+    SExecConfig cfg;
+    CHECK_FALSE(planFor(a, windowCtx(), cfg).ok);
+    a.workspace = 250;
+    CHECK_FALSE(planFor(a, windowCtx(), cfg).ok);
+}
+
+TEST_CASE("executor: focus dispatches at the live window ADDRESS, not a class regex") {
+    SAction a; a.verb = EVerb::Focus; a.windowAddress = "0x55f0aaaa"; a.windowLabel = "firefox";
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 1);
+    CHECK(hasLine(p, "hyprctl dispatch focuswindow address:0x55f0aaaa"));
+}
+
+TEST_CASE("executor: a window address that is not live is refused, never actuated") {
+    SAction a; a.verb = EVerb::Focus; a.windowAddress = "0xdeadbeef"; a.windowLabel = "ghost";
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    CHECK_FALSE(p.ok);
+    CHECK(p.steps.empty());
+}
+
+TEST_CASE("executor: fullscreen on a named window focuses it first, then toggles") {
+    SAction a; a.verb = EVerb::Fullscreen; a.windowAddress = "0x55f0aaaa"; a.windowLabel = "firefox";
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 2);
+    CHECK(lines(p)[0] == "hyprctl dispatch focuswindow address:0x55f0aaaa");
+    CHECK(lines(p)[1] == "hyprctl dispatch fullscreen 0");
+}
+
+TEST_CASE("executor: fullscreen with no named window acts on the focused one") {
+    SAction a; a.verb = EVerb::Fullscreen; a.target = "active"; a.targetSource = ETargetSource::Active;
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 1);
+    CHECK(hasLine(p, "hyprctl dispatch fullscreen 0"));
+}
+
+TEST_CASE("executor: a deictic fullscreen goes to the gazed monitor first") {
+    SAction a; a.verb = EVerb::Fullscreen; a.target = "XR-web"; a.targetSource = ETargetSource::Deixis;
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 2);
+    CHECK(lines(p)[0] == "hyprctl dispatch focusmonitor XR-web");
+    CHECK(lines(p)[1] == "hyprctl dispatch fullscreen 0");
+}
+
+TEST_CASE("executor: 'maximize' picks Hyprland's other fullscreen mode") {
+    SAction a; a.verb = EVerb::Fullscreen; a.sub = "maximize"; a.target = "active";
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, windowCtx(), cfg);
+    REQUIRE(p.ok);
+    CHECK(hasLine(p, "hyprctl dispatch fullscreen 1"));
+}
+
+TEST_CASE("executor: allow_window=false refuses every window verb") {
+    SExecConfig off; off.allowWindow = false;
+    SAction ws; ws.verb = EVerb::Workspace; ws.workspace = 2;
+    SAction fo; fo.verb = EVerb::Focus; fo.windowAddress = "0x55f0aaaa";
+    SAction fs; fs.verb = EVerb::Fullscreen; fs.target = "active";
+    CHECK_FALSE(planFor(ws, windowCtx(), off).ok);
+    CHECK_FALSE(planFor(fo, windowCtx(), off).ok);
+    CHECK_FALSE(planFor(fs, windowCtx(), off).ok);
 }

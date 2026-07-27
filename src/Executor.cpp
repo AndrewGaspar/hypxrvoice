@@ -4,6 +4,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 
+#include <cctype>
 #include <cstdio>
 #include <set>
 
@@ -108,6 +109,61 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
         plan.ok = true;
         plan.steps.push_back(step({"hyprctl", "dispatch", "exec", "--", it->second},
                                   "launch " + action.app));
+        return plan;
+    }
+
+    // ---- plain window management (round 2) ----
+    // These drive Hyprland itself rather than the XR layer, so they sit ahead of the
+    // allow_xrmonitor gate and of the monitor-target validation below.
+    if (action.verb == EVerb::Workspace || action.verb == EVerb::Focus ||
+        action.verb == EVerb::Fullscreen) {
+        if (!cfg.allowWindow) {
+            plan.reason = "window control disabled (executor.allow_window=false)";
+            return plan;
+        }
+        if (action.verb == EVerb::Workspace) {
+            // The index is a number WE parsed and WE format — transcript text never
+            // reaches the argv. Out of range is a refusal, not a clamp.
+            if (action.workspace < 1 || action.workspace > 99) {
+                plan.reason = "workspace index out of range — refusing";
+                return plan;
+            }
+            plan.ok = true;
+            plan.steps.push_back(step({"hyprctl", "dispatch", "workspace", std::to_string(action.workspace)},
+                                      "switch to workspace " + std::to_string(action.workspace)));
+            return plan;
+        }
+
+        // Focus/Fullscreen. A named window must still be LIVE in the snapshot — the same
+        // rule the monitor verbs follow, so a stale handle can never be dispatched.
+        if (!action.windowAddress.empty()) {
+            if (!ctx.hasWindow(action.windowAddress)) {
+                plan.reason = "window '" + action.windowLabel + "' is not a live window — refusing";
+                return plan;
+            }
+            plan.steps.push_back(step({"hyprctl", "dispatch", "focuswindow", "address:" + action.windowAddress},
+                                      "focus " + (action.windowLabel.empty() ? action.windowAddress
+                                                                             : action.windowLabel)));
+        } else if (action.targetSource == ETargetSource::Deixis && !action.target.empty() &&
+                   ctx.hasMonitor(action.target)) {
+            // "make THIS window fullscreen" while looking at another monitor: go there
+            // first, so "this" means what you are looking at.
+            plan.steps.push_back(step({"hyprctl", "dispatch", "focusmonitor", action.target},
+                                      "focus " + action.target));
+        }
+
+        if (action.verb == EVerb::Fullscreen) {
+            // Hyprland: 0 = fullscreen, 1 = maximize. Both toggle, which is the right
+            // reading of "make it fullscreen" said twice.
+            const bool maximize = action.sub == "maximize";
+            plan.steps.push_back(step({"hyprctl", "dispatch", "fullscreen", maximize ? "1" : "0"},
+                                      maximize ? "maximize" : "fullscreen"));
+        }
+        if (plan.steps.empty()) {
+            plan.reason = "nothing to focus — no window named and no gaze target";
+            return plan;
+        }
+        plan.ok = true;
         return plan;
     }
 
@@ -272,11 +328,73 @@ bool validateStep(const SExecStep& step, std::string& err) {
         return true;
     }
     if (a[1] == "dispatch") {
-        if (a.size() < 4 || a[2] != "exec" || a[3] != "--") {
-            err = "dispatch step must be `dispatch exec -- <cmd>`";
+        if (a.size() < 3) {
+            err = "dispatch step missing a dispatcher";
             return false;
         }
-        return true;
+        // A CLOSED set of dispatchers, each with its argument SHAPE checked here. This is
+        // the last line of defence: even if a bug upstream let a spoken word reach an
+        // argv, none of these shapes can carry one.
+        if (a[2] == "exec") {
+            if (a.size() < 5 || a[3] != "--") {
+                err = "dispatch step must be `dispatch exec -- <cmd>`";
+                return false;
+            }
+            return true;
+        }
+        if (a[2] == "focuswindow") {
+            // `address:0x…` only. NOT `class:…` — Hyprland reads that as a REGEX, so a
+            // class carrying a metachar could select the wrong window, or none.
+            if (a.size() != 4 || a[3].rfind("address:0x", 0) != 0 || a[3].size() <= 10 ||
+                a[3].size() > 10 + 16) {
+                err = "focuswindow must be `focuswindow address:0x<hex>`";
+                return false;
+            }
+            for (size_t i = 10; i < a[3].size(); i++)
+                if (!std::isxdigit(static_cast<unsigned char>(a[3][i]))) {
+                    err = "focuswindow address is not hexadecimal";
+                    return false;
+                }
+            return true;
+        }
+        if (a[2] == "focusmonitor") {
+            if (a.size() != 4 || a[3].empty() || a[3].size() > 64) {
+                err = "focusmonitor must be `focusmonitor <name>`";
+                return false;
+            }
+            // Monitor names come from the live snapshot; keep the charset boring anyway.
+            for (char c : a[3])
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_' && c != '.') {
+                    err = "focusmonitor name has an unexpected character";
+                    return false;
+                }
+            return true;
+        }
+        if (a[2] == "fullscreen") {
+            if (a.size() != 4 || (a[3] != "0" && a[3] != "1")) {
+                err = "fullscreen must be `fullscreen 0|1`";
+                return false;
+            }
+            return true;
+        }
+        if (a[2] == "workspace") {
+            if (a.size() != 4 || a[3].empty() || a[3].size() > 2) {
+                err = "workspace must be `workspace <1-99>`";
+                return false;
+            }
+            for (char c : a[3])
+                if (!std::isdigit(static_cast<unsigned char>(c))) {
+                    err = "workspace index is not a number";
+                    return false;
+                }
+            if (a[3] == "0" || a[3] == "00") {
+                err = "workspace index must be >= 1";
+                return false;
+            }
+            return true;
+        }
+        err = "dispatcher '" + a[2] + "' not in allowlist";
+        return false;
     }
     err = "second token '" + a[1] + "' not in {openxr, dispatch}";
     return false;

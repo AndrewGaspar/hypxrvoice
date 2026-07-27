@@ -38,12 +38,18 @@ SRawIntent CLlamaIntent::parseRaw(const std::string& json, int64_t deicticMs, bo
     r.anchor     = parseAnchorMode(jstr(root, "anchor"));
     r.sub        = jstr(root, "sub");
     r.deltaM     = jnum(root, "deltaM", 0.0);
+    r.workspace  = static_cast<int>(jnum(root, "workspace", 0));
     r.note       = "llama";
 
     std::string target = jstr(root, "target");
     std::string app    = jstr(root, "app");
     if (r.verb == EVerb::LaunchApp)
         r.appPhrase = app.empty() ? target : app;
+    else if (r.verb == EVerb::Focus || r.verb == EVerb::Fullscreen)
+        // Window verbs name an APP, and the grammar's `target` enumerates MONITORS —
+        // so the free-text `app` field is the carrier. finalize resolves it against the
+        // live window list, which is what keeps an invented name from actuating.
+        r.targetPhrase = app.empty() ? (target == "active" ? "" : target) : app;
     else if (target != "active" && !target.empty())
         r.targetPhrase = target;   // an enumerated live name; finalize matches it exactly.
 
@@ -66,7 +72,11 @@ std::string CLlamaIntent::buildPrompt(const STranscript& t, const SDesktopContex
          "monitor), place (drop/put it down), move_dist (closer/further; set deltaM "
          "negative for closer, positive for further), center, dock, undock, follow "
          "(have it follow me), anchor (world-lock or head/body), hand_input (hands "
-         "on/off), launch_app (open an app).\n";
+         "on/off), launch_app (open an app), focus (focus a running app's window), "
+         "fullscreen (toggle fullscreen on a window), workspace (switch to a numbered "
+         "workspace — put the number in `workspace`).\n";
+    p += "For focus/fullscreen put the spoken app name in `app` (e.g. \"browser\"), not "
+         "in `target`.\n";
     p += "target MUST be one of the monitor names below, or \"active\" for "
          "this/that/selected, or \"\".\n";
     p += "Set deictic=true when the user says \"this\"/\"that\"; place=true for "

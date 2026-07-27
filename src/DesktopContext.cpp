@@ -116,6 +116,20 @@ SDesktopContext SDesktopContext::parse(const std::string& monitorsJson,
                     if (json_object_get(c, "mapped") && !jbool(c, "mapped"))
                         continue; // skip unmapped/hidden surfaces
                     int monId = jint(c, "monitor", -1);
+
+                    // The window list is independent of the monitor join: a focusable
+                    // window on a monitor we didn't enumerate is still focusable.
+                    if (std::string addr = jstr(c, "address"); !addr.empty()) {
+                        SWindowInfo w;
+                        w.address        = addr;
+                        w.cls            = jstr(c, "class");
+                        w.title          = jstr(c, "title");
+                        w.monitorId      = monId;
+                        w.focusHistoryId = jint(c, "focusHistoryID", 1 << 30);
+                        w.focused        = w.focusHistoryId == 0;
+                        ctx.windows.push_back(std::move(w));
+                    }
+
                     auto it   = byId.find(monId);
                     if (it == byId.end())
                         continue;
@@ -187,6 +201,15 @@ const SMonitorInfo* SDesktopContext::find(const std::string& name) const {
         if (m.name == name)
             return &m;
     return nullptr;
+}
+
+bool SDesktopContext::hasWindow(const std::string& address) const {
+    if (address.empty())
+        return false;
+    for (auto& w : windows)
+        if (w.address == address)
+            return true;
+    return false;
 }
 
 const SMonitorInfo* SDesktopContext::hoveredMonitor() const {
@@ -309,6 +332,144 @@ SMonitorMatch SDesktopContext::resolveMonitor(const std::string& phrase) const {
         double margin = scored.size() > 1 ? (best - scored[1].score) : best;
         double cover  = std::min(1.0, best / static_cast<double>(ptoks.size()));
         res.confidence = std::min(1.0, 0.6 + 0.2 * cover + 0.2 * std::min(1.0, margin / 2.0));
+    }
+    return res;
+}
+
+const SWindowInfo* SDesktopContext::focusedWindow() const {
+    const SWindowInfo* best = nullptr;
+    for (auto& w : windows)
+        if (!best || w.focusHistoryId < best->focusHistoryId)
+            best = &w;
+    return (best && best->focusHistoryId == 0) ? best : nullptr;
+}
+
+namespace {
+    // A CLOSED table of generic spoken nouns -> the concrete app-class stems that noun
+    // may legitimately mean. Nobody says "focus the org.mozilla.firefox"; they say "the
+    // browser". This is deliberately a lookup table rather than fuzzy matching: a fixed
+    // noun expands to a fixed, reviewable stem set, and the result is INTERSECTED with
+    // the live window list, so the worst case is "no match" — never a surprise app.
+    //
+    // Stems go through the same tokMatch() as everything else, so "code" also covers
+    // "codium" and "chrome" covers "chromium". Two-letter stems are excluded by
+    // tokMatch's own rule (short tokens must match exactly), which is what keeps a stem
+    // like "st" from matching half the desktop.
+    const std::vector<std::pair<std::string, std::vector<std::string>>>& genericApps() {
+        static const std::vector<std::pair<std::string, std::vector<std::string>>> kTable = {
+            {"browser",  {"firefox", "chromium", "chrome", "brave", "vivaldi", "librewolf",
+                          "epiphany", "qutebrowser", "opera", "floorp", "waterfox", "zen"}},
+            {"editor",   {"nvim", "neovim", "vim", "gvim", "code", "codium", "vscode", "emacs",
+                          "kate", "gedit", "zed", "helix", "sublime", "jetbrains", "pycharm",
+                          "clion", "goland"}},
+            {"terminal", {"kitty", "alacritty", "foot", "ghostty", "wezterm", "konsole", "xterm",
+                          "urxvt", "terminator", "tilix"}},
+            {"files",    {"nautilus", "dolphin", "thunar", "nemo", "pcmanfm", "yazi", "ranger"}},
+            {"music",    {"spotify", "rhythmbox", "clementine", "strawberry", "audacious"}},
+            {"video",    {"mpv", "vlc", "celluloid", "totem"}},
+            {"chat",     {"discord", "slack", "element", "telegram", "signal", "zulip"}},
+            {"mail",     {"thunderbird", "evolution", "geary", "neomutt"}},
+        };
+        return kTable;
+    }
+
+    // Spoken synonyms that funnel onto a table key above. "" = not a generic noun.
+    std::string genericKeyFor(const std::string& tok) {
+        if (tok == "browser" || tok == "web") return "browser";
+        if (tok == "editor" || tok == "ide") return "editor";
+        if (tok == "terminal" || tok == "console" || tok == "shell") return "terminal";
+        if (tok == "files" || tok == "filemanager" || tok == "explorer") return "files";
+        if (tok == "music" || tok == "player") return "music";
+        if (tok == "video") return "video";
+        if (tok == "chat") return "chat";
+        if (tok == "mail" || tok == "email") return "mail";
+        return "";
+    }
+
+    bool matchesGeneric(const std::string& key, const std::vector<std::string>& classToks) {
+        for (auto& [k, stems] : genericApps()) {
+            if (k != key)
+                continue;
+            for (auto& stem : stems)
+                for (auto& ct : classToks)
+                    if (tokMatch(stem, ct))
+                        return true;
+        }
+        return false;
+    }
+}
+
+SWindowMatch SDesktopContext::resolveWindow(const std::string& phrase) const {
+    SWindowMatch res;
+    std::vector<std::string> ptoks;
+    for (auto& t : tokenize(phrase))
+        if (!isStop(t))
+            ptoks.push_back(t);
+    if (ptoks.empty() || windows.empty())
+        return res;
+
+    // Per phrase token the BEST interpretation wins (max, not sum), so one word cannot
+    // double-dip class + generic + title. The tiers are ordered by how specific the
+    // evidence is: naming the class outright beats a generic noun, which beats an
+    // inflected class hit, which beats a word merely appearing in a window title.
+    struct Scored { const SWindowInfo* win; double score; };
+    std::vector<Scored> scored;
+    for (auto& w : windows) {
+        std::vector<std::string> classToks = tokenize(w.cls);
+        std::vector<std::string> titleToks = tokenize(w.title);
+
+        double score = 0.0;
+        for (auto& pt : ptoks) {
+            double ts = 0.0;
+            for (auto& ct : classToks) {
+                if (pt == ct)
+                    ts = std::max(ts, 1.0);
+                else if (tokMatch(pt, ct))
+                    ts = std::max(ts, 0.8);
+            }
+            if (std::string key = genericKeyFor(pt); !key.empty() && matchesGeneric(key, classToks))
+                ts = std::max(ts, 0.9);
+            if (ts < 0.6) {
+                for (auto& tt : titleToks)
+                    if (tokMatch(pt, tt)) { ts = std::max(ts, 0.6); break; }
+            }
+            score += ts;
+        }
+        if (score > 0.0)
+            scored.push_back({&w, score});
+    }
+    if (scored.empty())
+        return res;
+
+    // Best score first; within an equal score, the most recently focused window — "the
+    // browser" means the browser you were just in, not an arbitrary one of five.
+    std::stable_sort(scored.begin(), scored.end(), [](const Scored& a, const Scored& b) {
+        if (a.score != b.score)
+            return a.score > b.score;
+        return a.win->focusHistoryId < b.win->focusHistoryId;
+    });
+
+    const double             best = scored.front().score;
+    std::vector<std::string> tiedLabels;
+    for (auto& s : scored) {
+        if (s.score < best - 0.001)
+            break;
+        const std::string label = s.win->cls.empty() ? s.win->title : s.win->cls;
+        if (std::find(tiedLabels.begin(), tiedLabels.end(), label) == tiedLabels.end())
+            tiedLabels.push_back(label);
+    }
+
+    res.matched = true;
+    res.address = scored.front().win->address;
+    res.label   = scored.front().win->cls.empty() ? scored.front().win->title : scored.front().win->cls;
+    if (tiedLabels.size() > 1) {
+        // Genuinely different apps scored the same — that is worth asking about. Two
+        // windows of the SAME app are not: recency already picked the right one.
+        res.confidence = 0.4;
+        res.candidates = tiedLabels;
+    } else {
+        const double cover = std::min(1.0, best / static_cast<double>(ptoks.size()));
+        res.confidence     = std::min(1.0, 0.55 + 0.45 * cover);
     }
     return res;
 }

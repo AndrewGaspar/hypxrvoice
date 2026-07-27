@@ -27,6 +27,14 @@ enum class EVerb {
     Anchor,     // "anchor it to my head/body" / "world-lock it".
     HandInput,  // "hands on/off" — conditional hand-input toggle.
     LaunchApp,  // "open the browser" — allowlisted desktop-entry launch.
+
+    // ---- plain window management (round-2: the phrasings the user actually spoke) ----
+    // These leave the XR layer alone and drive Hyprland itself. All three are
+    // non-destructive and reversible — nothing here can close, kill, or relocate a
+    // window — which is why they are permitted by default (executor.allow_window).
+    Focus,      // "focus the browser" — raise/focus a LIVE window.
+    Fullscreen, // "make this window fullscreen" — toggle fullscreen on a window.
+    Workspace,  // "workspace three" — switch to a numbered workspace.
 };
 
 const char* verbName(EVerb v);
@@ -79,6 +87,15 @@ struct SAction {
     std::string   sub;                           // sub-action: on|off|toggle|auto|here|head|body.
     double        deltaM = 0.0;                  // MoveDist push(+)/pull(-) meters.
     std::string   app;                           // LaunchApp: allowlist key (resolved to a command by the executor).
+
+    // Focus/Fullscreen: the address of a LIVE window taken verbatim from the compositor
+    // snapshot ("0x55f0…"). An address, not a class, because `focuswindow class:X` treats
+    // X as a REGEX — an address is exact and has a trivially checkable shape. Empty means
+    // "whatever is focused", which is the correct reading of "make it fullscreen".
+    std::string   windowAddress;
+    std::string   windowLabel;                   // human name for the HUD ("firefox").
+    // Workspace: the index WE parsed from the utterance, 1..99. 0 = none.
+    int           workspace = 0;
 
     SGazeResolution gaze;                        // populated when targetSource==Deixis.
 

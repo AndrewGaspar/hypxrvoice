@@ -175,3 +175,135 @@ TEST_CASE("intent: sanitizeDeltaM — utterance direction is authoritative, magn
     // Zero/absent value: step magnitude, default pull.
     CHECK(sanitizeDeltaM(0.0, "adjust it", 0.25) == doctest::Approx(-0.25));
 }
+
+// ---- window management (round 2) ---------------------------------------------------
+//
+// Every phrasing below is one the user actually spoke into the headset during live
+// round 2 and got "intent none" for. They are pinned here verbatim (including the two
+// forms whisper alternates between for a spoken number) so the grammar cannot quietly
+// regress on them again.
+
+namespace {
+    // A snapshot with real clients: addresses, classes and titles, so the window verbs
+    // have something live to resolve against.
+    SDesktopContext windowFixture() {
+        const char* mons = R"json([
+            {"id":0,"name":"eDP-1","focused":true},
+            {"id":3,"name":"XR-code"},
+            {"id":4,"name":"XR-web"}
+        ])json";
+        const char* cls = R"json([
+            {"address":"0x1111","class":"firefox","title":"YouTube - Mozilla Firefox",
+             "monitor":4,"mapped":true,"focusHistoryID":1},
+            {"address":"0x2222","class":"nvim","title":"main.cpp - NVIM",
+             "monitor":3,"mapped":true,"focusHistoryID":0},
+            {"address":"0x3333","class":"kitty","title":"~/code",
+             "monitor":0,"mapped":true,"focusHistoryID":2}
+        ])json";
+        const char* xr = R"json({"state":"focused","monitors":[
+            {"name":"XR-code","id":3,"anchor":{"mode":"local"}},
+            {"name":"XR-web","id":4,"anchor":{"mode":"body"}}
+        ]})json";
+        return SDesktopContext::parse(mons, cls, xr);
+    }
+}
+
+TEST_CASE("intent: every spoken fullscreen phrasing parses") {
+    CRuleIntent eng(icfg());
+    for (const char* phrase : {"make this window fullscreen", "make the window fullscreen",
+                               "fullscreen this", "make it fullscreen", "fullscreen",
+                               "make this window full screen"}) {
+        INFO("phrase: ", phrase);
+        CHECK(eng.detect(mk(phrase)).verb == EVerb::Fullscreen);
+    }
+    // "maximize" is Hyprland's other fullscreen mode, not a separate verb.
+    SRawIntent m = eng.detect(mk("maximize this window"));
+    CHECK(m.verb == EVerb::Fullscreen);
+    CHECK(m.sub == "maximize");
+}
+
+TEST_CASE("intent: 'fullscreen the browser' resolves the live browser window") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("fullscreen the browser"), windowFixture(), noGaze);
+    CHECK(a.verb == EVerb::Fullscreen);
+    CHECK(a.windowAddress == "0x1111");
+    CHECK(a.windowLabel == "firefox");
+}
+
+TEST_CASE("intent: a bare fullscreen acts on the focused window, not a guessed one") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("make this window fullscreen"), windowFixture(), noGaze);
+    CHECK(a.verb == EVerb::Fullscreen);
+    CHECK(a.windowAddress.empty());
+    CHECK(a.target == "active");
+}
+
+TEST_CASE("intent: 'workspace three' parses as digits AND as a number word") {
+    CRuleIntent eng(icfg());
+    // Whisper alternated between these two forms for the SAME spoken utterance during
+    // live round 2 ("3." on one attempt, "three." on the next).
+    struct { const char* text; int want; } cases[] = {
+        {"workspace three", 3},          {"workspace 3", 3},
+        {"go to workspace three", 3},    {"go to workspace 3", 3},
+        {"switch to workspace seven", 7},{"switch to workspace 7", 7},
+        {"workspace one", 1},            {"workspace ten", 10},
+        {"workspace 12", 12},            {"work space four", 4},
+    };
+    for (auto& c : cases) {
+        INFO("phrase: ", c.text);
+        SRawIntent r = eng.detect(mk(c.text));
+        CHECK(r.verb == EVerb::Workspace);
+        CHECK(r.workspace == c.want);
+    }
+}
+
+TEST_CASE("intent: 'workspace' with no number asks rather than guessing") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("go to workspace"), windowFixture(), noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.workspace == 0);
+}
+
+TEST_CASE("intent: 'focus the browser' resolves content-first to the live window") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("focus the browser"), windowFixture(), noGaze);
+    CHECK(a.verb == EVerb::Focus);
+    CHECK(a.windowAddress == "0x1111");
+    CHECK(a.windowLabel == "firefox");
+    CHECK(a.confidence > 0.6);
+
+    SAction b = eng.resolve(mk("focus the editor"), windowFixture(), noGaze);
+    CHECK(b.verb == EVerb::Focus);
+    CHECK(b.windowLabel == "nvim");
+
+    SAction c = eng.resolve(mk("switch to the terminal"), windowFixture(), noGaze);
+    CHECK(c.verb == EVerb::Focus);
+    CHECK(c.windowLabel == "kitty");
+
+    // Naming the app outright works just as well as the generic noun.
+    SAction d = eng.resolve(mk("focus firefox"), windowFixture(), noGaze);
+    CHECK(d.verb == EVerb::Focus);
+    CHECK(d.windowAddress == "0x1111");
+}
+
+TEST_CASE("intent: a focus target we cannot see asks instead of picking something") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("focus the spreadsheet"), windowFixture(), noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.windowAddress.empty());
+}
+
+// THE SAFETY CASE. When the leading word is lost — which is exactly what live round 2
+// produced, over and over — what survives is a bare trailing fragment. Those must stay
+// rejected: guessing a workspace switch or a focus change from "3." or "browser." would
+// turn a transcription failure into a wrong action.
+TEST_CASE("intent: a bare trailing fragment stays rejected, never guessed") {
+    CRuleIntent eng(icfg());
+    for (const char* frag : {"3", "three", "browser", "editor", "terminal", "window",
+                             "3.", "browser.", "the browser"}) {
+        INFO("fragment: ", frag);
+        CHECK(eng.detect(mk(frag)).verb == EVerb::None);
+    }
+    // And the negative control from the live round: ordinary speech is not a command.
+    CHECK(eng.detect(mk("I wonder what's for dinner")).verb == EVerb::None);
+}

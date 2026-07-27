@@ -51,7 +51,17 @@ energy_threshold = 0.012
 start_ms = 150          # sustained voiced audio before declaring speech onset
 end_ms = 600            # trailing silence (hangover) before ending an utterance
 max_utterance_ms = 12000
-pre_roll_ms = 300       # audio kept before the onset instant (avoids clipped words)
+pre_roll_ms = 300       # raw depth of the idle retention ring
+
+# Audio GUARANTEED to sit in front of the DECLARED onset instant. This is NOT the same
+# thing as pre_roll_ms: the ring is fed every idle frame, including the start_ms of
+# voiced audio that declares onset, and onset is back-dated to the first of those — so
+# pre_roll_ms alone left only (pre_roll_ms - start_ms) = 150 ms ahead of onset at the old
+# defaults. A quiet first syllable (an unvoiced fricative, or any source whose gain is
+# still ramping when you start talking) sat in that gap and was dropped even though it
+# was in the buffer the whole time, which is what produced transcripts like "browser."
+# for "focus the browser". Raise this if leading words are still clipped.
+onset_backpad_ms = 300
 
 [wake]
 enabled = true
@@ -136,6 +146,23 @@ allow_launch = false    # permit app launch — only from the [apps] allowlist b
 # not the per-monitor `grabbed` flag (that flag is hand/controller grabs only).
 targeted_grab = true    # `openxr gazegrab <name>` — grab a NAMED monitor
 place_at_pose = true    # `openxr place <name> at x,y,z` — drop at the resolved gaze point
+# Plain window management: "focus the browser", "make this window fullscreen",
+# "workspace three". These drive Hyprland rather than the XR layer and are
+# non-destructive and reversible — nothing in this class can close, kill, or relocate a
+# window — so they are permitted by default. dry_run still gates whether they run.
+allow_window = true
+
+# ---- capture forensics (OFF by default — turn on only while debugging) ----
+# Setting dump_audio_dir writes MICROPHONE AUDIO TO DISK: for every capture window, the
+# full window audio (pre-roll splice included), each segment handed to whisper, and a
+# sidecar .txt recording the splice point and the VAD boundaries. It exists to answer one
+# question — when a leading word is missing, was it never in the audio (source-side gating
+# on the headset mic) or did our segmenter cut it? Compare the -window.wav against the
+# -segN.wav and the answer is a waveform rather than an argument. The daemon logs a
+# standing WARN for as long as this is set; unset it when you are done.
+[debug]
+# dump_audio_dir = "/tmp/hypxrvoice-dumps"
+dump_audio_keep = 50    # windows retained on disk; older ones are pruned
 
 # ---- app-launch allowlist: spoken alias -> a TRUSTED launch command ----
 # Never derived from transcript text. Use the uwsm/systemd-run pattern.

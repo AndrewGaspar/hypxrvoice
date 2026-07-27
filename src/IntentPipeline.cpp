@@ -16,6 +16,7 @@ namespace IntentPipeline {
         ec.dryRun         = cfg.executor.dryRun;
         ec.allowXrmonitor = cfg.executor.allowXrmonitor;
         ec.allowLaunch    = cfg.executor.allowLaunch;
+        ec.allowWindow    = cfg.executor.allowWindow;
         ec.distanceStep   = cfg.intent.distanceStep;
         ec.appAllowlist   = cfg.apps;
         ec.caps.targetedGrab = cfg.executor.targetedGrab;

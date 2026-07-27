@@ -144,8 +144,15 @@ namespace Feedback {
                          a.toJson().c_str(), plan.toJson().c_str());
             std::fflush(stdout);
         }
+        // The window verbs name a window or a workspace, not a monitor, so log THEIR
+        // subject rather than an empty target field.
+        std::string subject = a.target;
+        if (a.verb == EVerb::Workspace)
+            subject = "ws" + std::to_string(a.workspace);
+        else if (!a.windowLabel.empty())
+            subject = a.windowLabel;
         Log::log(Log::INFO, "intent [{}] target={} src={} conf={:.2f} steps={} {}",
-                 verbName(a.verb), a.target.empty() ? "-" : a.target,
+                 verbName(a.verb), subject.empty() ? "-" : subject,
                  targetSourceName(a.targetSource), a.confidence, plan.steps.size(),
                  plan.approximated ? "(approx)" : "");
 

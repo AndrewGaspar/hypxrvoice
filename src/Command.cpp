@@ -19,6 +19,9 @@ const char* verbName(EVerb v) {
         case EVerb::Anchor:    return "anchor";
         case EVerb::HandInput: return "hand_input";
         case EVerb::LaunchApp: return "launch_app";
+        case EVerb::Focus:      return "focus";
+        case EVerb::Fullscreen: return "fullscreen";
+        case EVerb::Workspace:  return "workspace";
     }
     return "?";
 }
@@ -36,6 +39,9 @@ EVerb verbFromName(const std::string& s) {
     if (s == "anchor")     return EVerb::Anchor;
     if (s == "hand_input") return EVerb::HandInput;
     if (s == "launch_app") return EVerb::LaunchApp;
+    if (s == "focus")      return EVerb::Focus;
+    if (s == "fullscreen") return EVerb::Fullscreen;
+    if (s == "workspace")  return EVerb::Workspace;
     return EVerb::None;
 }
 
@@ -139,6 +145,14 @@ std::string SAction::toJson() const {
         o += ",\"app\":";
         appendEscaped(o, app);
     }
+    if (!windowAddress.empty()) {
+        o += ",\"window\":";
+        appendEscaped(o, windowAddress);
+        o += ",\"windowLabel\":";
+        appendEscaped(o, windowLabel);
+    }
+    if (verb == EVerb::Workspace)
+        o += ",\"workspace\":" + std::to_string(workspace);
     o += ",\"confidence\":" + num(confidence, "%.2f");
     if (verb == EVerb::Clarify) {
         o += ",\"clarifyQuestion\":";
@@ -205,7 +219,10 @@ bool parseAction(const std::string& json, SAction& out, std::string& err) {
         out.anchor = parseAnchorMode(jstr(root, "anchor"));
     out.sub = jstr(root, "sub");
     out.deltaM = jnum(root, "deltaM", 0.0);
-    out.app = jstr(root, "app");
+    out.app           = jstr(root, "app");
+    out.windowAddress = jstr(root, "window");
+    out.windowLabel   = jstr(root, "windowLabel");
+    out.workspace     = static_cast<int>(jnum(root, "workspace", 0));
     out.confidence = jnum(root, "confidence", 1.0);
     out.clarifyQuestion = jstr(root, "clarifyQuestion");
     if (json_t* cands = json_object_get(root, "clarifyCandidates"); cands && json_is_array(cands)) {

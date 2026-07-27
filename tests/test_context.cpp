@@ -215,3 +215,91 @@ TEST_CASE("context: degrades gracefully with empty/invalid blobs") {
     SDesktopContext g = SDesktopContext::parse("not json", "{}", "[]");
     CHECK(g.monitors.empty());
 }
+
+// ---- live window list + spoken window references (round 2) --------------------------
+
+namespace {
+    SDesktopContext windowSnapshot() {
+        const char* mons = R"json([{"id":0,"name":"eDP-1","focused":true},{"id":4,"name":"XR-web"}])json";
+        const char* cls  = R"json([
+            {"address":"0xaaa","class":"firefox","title":"YouTube - Mozilla Firefox",
+             "monitor":4,"mapped":true,"focusHistoryID":2},
+            {"address":"0xbbb","class":"neovim","title":"Vad.cpp - NVIM",
+             "monitor":0,"mapped":true,"focusHistoryID":0},
+            {"address":"0xccc","class":"kitty","title":"~/code/hypxrvoice",
+             "monitor":0,"mapped":true,"focusHistoryID":1},
+            {"address":"0xddd","class":"firefox","title":"Hyprland docs - Mozilla Firefox",
+             "monitor":0,"mapped":true,"focusHistoryID":3}
+        ])json";
+        return SDesktopContext::parse(mons, cls, "");
+    }
+}
+
+TEST_CASE("context: parses live windows with their addresses and focus recency") {
+    SDesktopContext ctx = windowSnapshot();
+    REQUIRE(ctx.windows.size() == 4);
+    CHECK(ctx.hasWindow("0xaaa"));
+    CHECK_FALSE(ctx.hasWindow("0xdeadbeef"));
+    REQUIRE(ctx.focusedWindow() != nullptr);
+    CHECK(ctx.focusedWindow()->cls == "neovim");
+}
+
+TEST_CASE("context: a generic spoken noun resolves to a live app of that kind") {
+    SDesktopContext ctx = windowSnapshot();
+
+    // "browser" is not any window's class — it resolves through the closed generic-noun
+    // table, then intersects with what is actually running.
+    SWindowMatch b = ctx.resolveWindow("browser");
+    REQUIRE(b.matched);
+    CHECK(b.label == "firefox");
+    // Two firefox windows tie; recency picks the one you were last in, and the tie is
+    // NOT reported as ambiguous because both are the same app.
+    CHECK(b.address == "0xaaa");
+    CHECK(b.candidates.empty());
+
+    // "editor" reaches neovim through the same table (stem "nvim" ~ "neovim").
+    CHECK(ctx.resolveWindow("editor").label == "neovim");
+    CHECK(ctx.resolveWindow("terminal").label == "kitty");
+}
+
+TEST_CASE("context: naming the class outright beats a title coincidence") {
+    SDesktopContext ctx = windowSnapshot();
+    SWindowMatch k = ctx.resolveWindow("kitty");
+    REQUIRE(k.matched);
+    CHECK(k.address == "0xccc");
+
+    // A word that only appears in a TITLE still resolves — content-first — but scores
+    // below an outright class hit.
+    SWindowMatch y = ctx.resolveWindow("youtube");
+    REQUIRE(y.matched);
+    CHECK(y.address == "0xaaa");
+}
+
+TEST_CASE("context: an unknown window reference does not match anything") {
+    SDesktopContext ctx = windowSnapshot();
+    CHECK_FALSE(ctx.resolveWindow("spreadsheet").matched);
+    CHECK_FALSE(ctx.resolveWindow("").matched);
+    // Stop-words alone carry no identity.
+    CHECK_FALSE(ctx.resolveWindow("the window").matched);
+}
+
+TEST_CASE("context: a genuinely ambiguous reference reports both apps") {
+    // "docs" appears only in the TITLE of two DIFFERENT apps, so neither wins on
+    // specificity — the caller is told rather than having one silently picked. (An
+    // outright class hit would have settled it: exactness beats a title coincidence.)
+    const char* mons = R"json([{"id":0,"name":"eDP-1"}])json";
+    const char* cls  = R"json([
+        {"address":"0x1","class":"firefox","title":"Hyprland docs","monitor":0,"mapped":true,"focusHistoryID":0},
+        {"address":"0x2","class":"neovim","title":"docs.md - NVIM","monitor":0,"mapped":true,"focusHistoryID":1}
+    ])json";
+    SDesktopContext ctx = SDesktopContext::parse(mons, cls, "");
+    SWindowMatch    m   = ctx.resolveWindow("docs");
+    REQUIRE(m.matched);
+    REQUIRE(m.candidates.size() == 2);
+    CHECK(m.confidence < 0.5);
+
+    // Two windows of the SAME app are not ambiguous: recency already answered it.
+    SWindowMatch b = ctx.resolveWindow("browser");
+    REQUIRE(b.matched);
+    CHECK(b.candidates.empty());
+}

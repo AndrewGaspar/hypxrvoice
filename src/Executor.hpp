@@ -32,6 +32,10 @@ struct SExecConfig {
     bool dryRun        = true;  // DEFAULT: log argv, actuate nothing.
     bool allowXrmonitor = true; // master switch for all openxr/xrmonitor actuation.
     bool allowLaunch   = false; // app launch is off unless explicitly enabled.
+    // Plain window management (focus / fullscreen / workspace). Non-destructive and
+    // reversible — nothing in this class can close, kill, or relocate a window — so it
+    // is permitted by default; dryRun still decides whether anything actually runs.
+    bool allowWindow   = true;
     double distanceStep = 0.25; // default push/pull step (m) when the action gives none.
     // Allowlist: spoken app key -> a TRUSTED launch command (operator config). The
     // command is passed to `hyprctl dispatch exec -- <cmd>` verbatim; it is never

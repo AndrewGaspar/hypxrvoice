@@ -35,6 +35,7 @@ struct SRawIntent {
     EAnchorMode anchor = EAnchorMode::Unset;
     std::string sub;                    // on|off|toggle|auto|here|head|body.
     double      deltaM = 0.0;
+    int         workspace = 0;          // Workspace: the index parsed from the utterance.
     std::string appPhrase;              // LaunchApp: spoken app words.
     double      confidence = 1.0;
     std::string note;

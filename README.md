@@ -77,8 +77,12 @@ values are directly comparable.
 
 ### Intent tier + executor (WP-V4)
 
-Each transcript is turned into a **typed, closed-schema command** (`SAction`, 12 verbs)
-and then an allowlisted `hyprctl` plan:
+Each transcript is turned into a **typed, closed-schema command** (`SAction`, 15 verbs)
+and then an allowlisted `hyprctl` plan. Twelve verbs drive the XR layer (pick, place,
+move, center, dock/undock, follow, anchor, hand input, launch); three drive plain
+Hyprland window management — **focus** ("focus the browser"), **fullscreen** ("make this
+window fullscreen"), and **workspace** ("workspace three"). The window verbs are
+non-destructive and reversible, so they are permitted by default (`executor.allow_window`).
 
 - **Desktop-context snapshot** at utterance time — `hyprctl monitors -j` + `clients -j` +
   `-j openxr status` (all read-only) — enumerates live monitor names and the apps on
@@ -89,10 +93,16 @@ and then an allowlisted `hyprctl` plan:
 - **Deixis** — "pick **this** up" / "place it **here**" is resolved at the timestamp of
   the deictic *word* via `hyprctl -j openxr gaze at <ms>`, over a lead-shifted stability
   window (gaze leads speech; ASR timestamps are noisy). One deictic per utterance.
+- **Window references** — "the browser" / "the editor" / "the terminal" resolve through a
+  small **closed** generic-noun table intersected with the LIVE window list, so a spoken
+  noun can only ever select an app that is actually running. The chosen window is
+  dispatched at its **address**, never `class:` — Hyprland reads a class as a regex.
 - **Executor** — a pure map from `SAction` to a plan of `hyprctl openxr …` /
-  `dispatch exec -- …` argv, behind a **STRICT allowlist** (closed verb set; transcript
-  text is never interpolated into a command line). **`executor.dry_run` defaults true** —
-  it logs the exact argv and actuates nothing until you flip it off.
+  `dispatch exec|focuswindow|focusmonitor|fullscreen|workspace …` argv, behind a **STRICT
+  allowlist**: a closed dispatcher set with each argument *shape* checked (an address must
+  be hex, a workspace must be 1–99, fullscreen must be 0/1), and transcript text is never
+  interpolated into a command line. **`executor.dry_run` defaults true** — it logs the
+  exact argv and actuates nothing until you flip it off.
 
 Two spoken interactions need compositor verbs that don't exist yet (targeted grab,
 place-at-pose); the executor uses documented approximations behind capability flags and
@@ -177,6 +187,36 @@ never leave the process. When a window opens the ring is spliced onto the front 
 speech that began *before* the press is transcribed in full. Out of the headset the stream
 is still opened per window (a desk source resumes locally and fast, so holding it buys
 nothing). `capture.hold = false` restores per-window streams everywhere.
+
+### The onset back-pad
+
+Holding the stream was necessary but not sufficient: leading words kept disappearing
+("browser." for "focus the browser", "3." for "workspace three"). The second cause was in
+the segmenter. The VAD's retention ring is fed *every* idle frame — including the
+`vad.start_ms` of voiced audio that declares onset — and onset is back-dated to the first
+of those frames. So `vad.pre_roll_ms` alone left only `pre_roll_ms - start_ms` of audio in
+front of the onset instant: **150 ms** at the shipped defaults, half of what its name
+implied. A first syllable that is quiet — an unvoiced fricative, or any source whose gain
+is still ramping when you start talking — lives in that gap and was dropped despite having
+been in the buffer the whole time.
+
+`vad.onset_backpad_ms` (default 300) states the guarantee directly: the ring is sized as
+`max(pre_roll_ms, onset_backpad_ms + start_ms)`, and every emitted segment carries at least
+that much audio ahead of its onset. `hypxrvoiced` logs the achieved back-pad for every
+segment, so the journal alone distinguishes "cut short" from "never arrived".
+
+### Capture forensics (`debug.dump_audio_dir`, off by default)
+
+When a leading word goes missing there are two very different causes — the source never
+sent it (headset-mic gating/AGC), or we cut it — and they produce identical transcripts.
+Setting `debug.dump_audio_dir` writes, per capture window, the **full window audio**
+(pre-roll splice included), **each segment handed to whisper**, and a sidecar `.txt` with
+the splice point and every VAD boundary. If the word is inaudible in the window wav it is
+the source; if it is audible there but absent from the segment wav it is us. Disk use is
+bounded to the newest `dump_audio_keep` windows (default 50).
+
+**This writes microphone audio to disk**, which is why it is off by default and why the
+daemon logs a standing warning for as long as it is set. Unset it when the round is over.
 
 **Trade-off:** a held stream keeps `wivrn.source` running, which keeps the headset mic
 streaming — a small continuous battery cost on the headset. Wake-word mode already did

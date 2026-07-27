@@ -27,6 +27,32 @@ struct SMonitorInfo {
     std::vector<std::string> appTitles;  // window titles present on this monitor.
 };
 
+// One live toplevel window. Carried alongside the per-monitor app lists because the
+// window verbs (focus / fullscreen) need to name ONE window, not a monitor, and they
+// need an exact handle for it.
+struct SWindowInfo {
+    // The compositor's own handle, "0x55f0abcd1234". Exact and unambiguous — unlike
+    // `class:X`, which Hyprland interprets as a REGEX, so a class carrying a metachar
+    // could select the wrong window (or none). Never derived from transcript text.
+    std::string address;
+    std::string cls;
+    std::string title;
+    int         monitorId      = -1;
+    // Hyprland's recency rank: 0 is the focused window, 1 the one before it, and so on.
+    // Used to break a tie deterministically toward "the one you were just using".
+    int         focusHistoryId = 1 << 30;
+    bool        focused        = false;
+};
+
+// Result of a semantic window resolution ("the browser" -> a live firefox window).
+struct SWindowMatch {
+    bool                     matched    = false;
+    std::string              address;           // exact handle for the executor.
+    std::string              label;             // human name for the HUD ("firefox").
+    double                   confidence = 0.0;  // 0..1.
+    std::vector<std::string> candidates;        // distinct labels when genuinely ambiguous.
+};
+
 // Result of a semantic monitor resolution.
 struct SMonitorMatch {
     bool                     matched    = false;
@@ -37,6 +63,7 @@ struct SMonitorMatch {
 
 struct SDesktopContext {
     std::vector<SMonitorInfo> monitors;
+    std::vector<SWindowInfo>  windows;
     bool        xrAvailable = false;
     std::string xrState;                 // openxr status.state, if available.
 
@@ -51,6 +78,10 @@ struct SDesktopContext {
     bool                     hasMonitor(const std::string& name) const;
     const SMonitorInfo*      find(const std::string& name) const;
 
+    // Is this window handle live right now? The executor's last check before it
+    // dispatches at an address, so a stale handle is refused instead of actuated.
+    bool                     hasWindow(const std::string& address) const;
+
     // The single ray-hovered monitor, if exactly one (a cheap deixis fallback when
     // gaze history is unavailable). Null otherwise.
     const SMonitorInfo*      hoveredMonitor() const;
@@ -59,6 +90,18 @@ struct SDesktopContext {
     // against monitor names + the apps living on them. Returns the best monitor, a
     // confidence, and — when two-plus tie — the candidate set for a Clarify.
     SMonitorMatch resolveMonitor(const std::string& phrase) const;
+
+    // Semantic resolution of a spoken window reference against the LIVE window list:
+    // an app class said outright ("firefox"), a generic noun from a small closed table
+    // ("the browser", "the editor", "the terminal"), or a title keyword. Only ever
+    // returns a window that exists right now, so the executor can never be handed a
+    // handle the compositor does not know. Ties resolve toward the most recently focused
+    // window; `candidates` is filled only when the tie spans DIFFERENT apps, which is
+    // the only case where asking the user is actually informative.
+    SWindowMatch resolveWindow(const std::string& phrase) const;
+
+    // The focused window, if the snapshot identified one. Null otherwise.
+    const SWindowInfo* focusedWindow() const;
 
     // Compact, deterministic digest for the intent prompt (bounded by caps).
     std::string digest(int maxMonitors = 16, int maxAppsPerMon = 6) const;
