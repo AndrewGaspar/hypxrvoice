@@ -4,6 +4,23 @@
 #include <algorithm>
 
 namespace Pipeline {
+    SVadConfig vadConfig(const SConfig& cfg) {
+        SVadConfig vc;
+        vc.sampleRate       = cfg.audio.sampleRate;
+        vc.energyThreshold  = cfg.vad.energyThreshold;
+        vc.startMs          = cfg.vad.startMs;
+        vc.endMs            = cfg.vad.endMs;
+        vc.maxUtteranceMs   = cfg.vad.maxUtteranceMs;
+        vc.preRollMs        = cfg.vad.preRollMs;
+        vc.onsetBackpadMs   = cfg.vad.onsetBackpadMs;
+        vc.gapToleranceMs   = cfg.vad.gapToleranceMs;
+        vc.presenceMs       = cfg.vad.presenceMs;
+        vc.adaptive         = cfg.vad.adaptive;
+        vc.noiseFloorFactor = cfg.vad.noiseFloorFactor;
+        vc.noiseWindowMs    = cfg.vad.noiseWindowMs;
+        return vc;
+    }
+
     bool processSegment(CAsr& asr, const SConfig& cfg, const SSpeechSegment& seg,
                         EActivation activation, bool requireWake, STranscript& out) {
         out = asr.transcribe(seg.samples, seg.bufferStartMs, seg.onsetMs, seg.endMs, activation);

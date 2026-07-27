@@ -19,8 +19,12 @@ CVad::CVad(const SVadConfig& cfg) : m_cfg(cfg) {
     // SVadConfig::onsetBackpadMs). Rounded UP so the guarantee is met rather than missed
     // by a frame. Always at least one frame — a zero-depth ring would drop the very
     // frame that triggered onset.
+    // The gap tolerance lets the onset run span a dip, so the run can be up to
+    // gapToleranceMs longer in WALL time than startMs; add it so the back-pad guarantee
+    // survives a choppy first word too.
     const int backpadMs = std::max(0, m_cfg.onsetBackpadMs);
-    const int depthMs   = std::max(std::max(0, m_cfg.preRollMs), backpadMs + std::max(0, m_cfg.startMs));
+    const int runMs     = std::max(0, m_cfg.startMs) + std::max(0, m_cfg.gapToleranceMs);
+    const int depthMs   = std::max(std::max(0, m_cfg.preRollMs), backpadMs + runMs);
     m_preRollFrames     = static_cast<size_t>((depthMs + m_cfg.frameMs - 1) / m_cfg.frameMs);
     if (m_preRollFrames == 0)
         m_preRollFrames = 1;
@@ -108,6 +112,7 @@ void CVad::processFrame(const float* frame, int64_t frameStartMs, std::vector<SS
             if (m_voicedRunMs == 0)
                 m_runStartMs = frameStartMs; // first voiced frame of this run
             m_voicedRunMs += m_cfg.frameMs;
+            m_runGapMs = 0;
             if (m_voicedRunMs >= m_cfg.startMs) {
                 // Onset. The utterance IS the ring: the current frame was pushed into it
                 // at the top of this call, so appending `frame` again (as this used to)
@@ -124,8 +129,18 @@ void CVad::processFrame(const float* frame, int64_t frameStartMs, std::vector<SS
                     m_utterance.insert(m_utterance.end(), pf.begin(), pf.end());
                 m_preRoll.clear();
             }
-        } else {
-            m_voicedRunMs = 0;
+        } else if (m_voicedRunMs > 0) {
+            // A DIP inside the run, not (yet) the end of it. Real words are full of these
+            // — the stop before "focus"'s /k/, the one before "workspace"'s /sp/ — and
+            // resetting on the first of them is what made a short, choppy word structurally
+            // undetectable (see SVadConfig::gapToleranceMs). The run is PAUSED: the gap
+            // does not count toward startMs, so noise gains nothing, and it is discarded
+            // only once the gap outlasts the tolerance.
+            m_runGapMs += m_cfg.frameMs;
+            if (m_runGapMs > m_cfg.gapToleranceMs) {
+                m_voicedRunMs = 0;
+                m_runGapMs    = 0;
+            }
         }
         return;
     }
@@ -154,6 +169,7 @@ void CVad::emit(int64_t endMs, std::vector<SSpeechSegment>& out) {
 
     m_inSpeech     = false;
     m_voicedRunMs  = 0;
+    m_runGapMs     = 0;
     m_silenceRunMs = 0;
     m_utterance.clear();
     // NOTE: the ring is deliberately NOT cleared here — what it holds is the trailing
@@ -167,4 +183,58 @@ bool CVad::flush(std::vector<SSpeechSegment>& out) {
     int64_t endMs = m_baseMonoMs + (m_sampleIdx * 1000) / m_cfg.sampleRate;
     emit(endMs, out);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Whole-buffer speech presence (the PTT path's no-speech verdict).
+// ---------------------------------------------------------------------------
+
+SSpeechPresence detectSpeechPresence(const float* samples, size_t n, const SVadConfig& cfg) {
+    SSpeechPresence out;
+    const int    frameMs = cfg.frameMs > 0 ? cfg.frameMs : 20;
+    const int    sr      = cfg.sampleRate > 0 ? cfg.sampleRate : 16000;
+    const size_t frameN  = std::max<size_t>(1, static_cast<size_t>(sr) * frameMs / 1000);
+    if (!samples || n < frameN)
+        return out;
+
+    std::vector<float> rmsPerFrame;
+    rmsPerFrame.reserve(n / frameN);
+    for (size_t off = 0; off + frameN <= n; off += frameN) {
+        const float r = rms(samples + off, frameN);
+        rmsPerFrame.push_back(r);
+        out.peakRms = std::max(out.peakRms, r);
+    }
+    if (rmsPerFrame.empty())
+        return out;
+
+    // The buffer's own ambient: the same 20th percentile the live detector uses, so the
+    // two agree about what "silence" means on this source.
+    std::vector<float> sorted(rmsPerFrame);
+    size_t             idx = static_cast<size_t>(sorted.size() * 0.2f);
+    if (idx >= sorted.size())
+        idx = sorted.size() - 1;
+    std::nth_element(sorted.begin(), sorted.begin() + idx, sorted.end());
+    out.floorRms = sorted[idx];
+
+    // DELIBERATELY below the live gate: half the fixed floor, or 1.5x the measured
+    // ambient. Both terms sit under the VAD's own max(energyThreshold, floor*1.6), so a
+    // buffer this rejects could never have produced a segment either — the verdict can
+    // only ever transcribe MORE than the old path, never less.
+    //
+    // The ambient term is additionally capped at half the PEAK. A buffer that is speech
+    // end to end (the user talked through the whole window) has no quiet frames for the
+    // percentile to find, so its "floor" IS the speech — and an uncapped 1.5x of that
+    // would declare the loudest utterance in the round to be silence. Capping cannot
+    // break the invariant above: min(floor*1.5, peak*0.5) <= floor*1.6 either way.
+    static constexpr float kFixedFraction = 0.5f;
+    static constexpr float kNoiseFactor   = 1.5f;
+    static constexpr float kPeakFraction  = 0.5f;
+    out.threshold = std::max(cfg.energyThreshold * kFixedFraction,
+                             std::min(out.floorRms * kNoiseFactor, out.peakRms * kPeakFraction));
+
+    for (float r : rmsPerFrame)
+        if (r >= out.threshold)
+            out.voicedMs += frameMs;
+    out.found = out.voicedMs >= std::max(0, cfg.presenceMs);
+    return out;
 }

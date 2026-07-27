@@ -312,3 +312,125 @@ TEST_CASE("vad: a second utterance right after the first still gets its full bac
     // …and that back-pad reaches back past the start of the quiet syllable (1350 ms).
     CHECK(segs[1].bufferStartMs <= 1350);
 }
+
+// ---- gap-tolerant onset (the round-3 "choppy word never triggers" fix) ----
+//
+// start_ms used to demand start_ms of CONSECUTIVE voiced frames. No real word delivers
+// that: "focus" has a stop gap before its /k/, "workspace" one before its /sp/. Each dip
+// reset the run to zero, so a short quiet word could never declare onset at all — the
+// live dumps show "focus the browser" onsetting at 2.82 s ("browser") with "focus" plainly
+// present at 2.04 s, and "workspace three" producing no segment whatsoever.
+
+// A choppy word: `voicedMs` of tone, a `gapMs` hole, then `voicedMs` of tone again.
+static std::vector<float> makeChoppyWord(int leadMs, int voicedMs, int gapMs, int tailMs, float amp) {
+    const int sr = 16000;
+    auto      ms = [&](int m) { return sr * m / 1000; };
+    std::vector<float> b;
+    auto tone = [&](int lenMs) {
+        const size_t n0 = b.size();
+        for (int i = 0; i < ms(lenMs); i++)
+            b.push_back(amp * std::sin(2.0 * M_PI * 300.0 * (n0 + i) / sr));
+    };
+    b.insert(b.end(), ms(leadMs), 0.f);
+    tone(voicedMs);
+    b.insert(b.end(), ms(gapMs), 0.f);
+    tone(voicedMs);
+    b.insert(b.end(), ms(tailMs), 0.f);
+    return b;
+}
+
+TEST_CASE("vad: a choppy word (80ms / 40ms gap / 80ms) declares onset") {
+    SVadConfig cfg;
+    cfg.adaptive        = false; // deterministic gate
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 150;
+    cfg.endMs           = 300;
+    cfg.gapToleranceMs  = 100;
+    CVad vad(cfg);
+
+    auto                        buf = makeChoppyWord(600, 80, 40, 800, 0.30f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+
+    REQUIRE(segs.size() == 1);
+    // 160 ms of VOICED frames across one 40 ms dip is enough — and the onset is back-dated
+    // to the FIRST voiced frame, i.e. the true start of the word at 600 ms.
+    CHECK(segs[0].onsetMs >= 580);
+    CHECK(segs[0].onsetMs <= 640);
+}
+
+TEST_CASE("vad: with no gap tolerance the same word is invisible (the bug)") {
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 150;
+    cfg.endMs           = 300;
+    cfg.gapToleranceMs  = 0; // the old behaviour
+    CVad vad(cfg);
+
+    auto                        buf = makeChoppyWord(600, 80, 40, 800, 0.30f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    CHECK(segs.empty()); // neither 80 ms half reaches start_ms on its own
+}
+
+TEST_CASE("vad: the gap tolerance does not count toward start_ms") {
+    // The tolerance PAUSES the run; it must not fill it. 60 ms of voicing either side of a
+    // 60 ms hole is 120 ms of speech — still short of a 150 ms start_ms — so nothing fires.
+    // This is what keeps the gate no looser on noise than it was.
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 150;
+    cfg.endMs           = 300;
+    cfg.gapToleranceMs  = 100;
+    CVad vad(cfg);
+
+    auto                        buf = makeChoppyWord(600, 60, 60, 800, 0.30f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    CHECK(segs.empty());
+}
+
+TEST_CASE("vad: a gap LONGER than the tolerance still resets the run") {
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 150;
+    cfg.endMs           = 300;
+    cfg.gapToleranceMs  = 100;
+    CVad vad(cfg);
+
+    // 120 ms voiced, a 200 ms hole (over the tolerance), 120 ms voiced: two runs of 120 ms,
+    // neither of which reaches start_ms.
+    auto                        buf = makeChoppyWord(600, 120, 200, 800, 0.30f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    CHECK(segs.empty());
+}
+
+TEST_CASE("vad: the back-pad guarantee survives a gap-spanning onset run") {
+    // The ring is sized for start_ms + gap_tolerance_ms of run, so the onsetBackpadMs
+    // contract holds even when the run that declared onset spanned a dip.
+    SVadConfig cfg;
+    cfg.adaptive        = false;
+    cfg.energyThreshold = 0.05f;
+    cfg.startMs         = 150;
+    cfg.endMs           = 300;
+    cfg.gapToleranceMs  = 100;
+    cfg.preRollMs       = 300;
+    cfg.onsetBackpadMs  = 300;
+    CVad vad(cfg);
+
+    auto                        buf = makeChoppyWord(600, 100, 80, 800, 0.30f);
+    std::vector<SSpeechSegment> segs;
+    vad.push(buf.data(), buf.size(), 0, segs);
+    vad.flush(segs);
+    REQUIRE(segs.size() == 1);
+    CHECK(segs[0].backpadMs() >= cfg.onsetBackpadMs);
+    CHECK(segs[0].bufferStartMs <= 300);
+}

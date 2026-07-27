@@ -9,6 +9,7 @@
 #include "ControlSocket.hpp"
 #include "LlamaIntent.hpp"
 #include "PreRoll.hpp"
+#include "PttWindow.hpp"
 #include "Vad.hpp"
 
 #include <atomic>
@@ -53,6 +54,9 @@ class CDaemon {
     void applyMicPolicy();      // reconcile both against the state machine + environment
     bool captureShouldBeHeld() const;
     bool captureIsActive() const { return m_captureActive; }
+    // Is a PUSH-TO-TALK window open right now? (The machine is in Listening and the
+    // activation that opened it was a press, not the wake word.)
+    bool pttListening() const;
     void startCapture(const std::string& source); // (re)connect, with failure backoff
     void openCaptureWindow();   // gate opens: fresh VAD seeded with the pre-roll splice
     std::string chooseSource() const;
@@ -60,6 +64,11 @@ class CDaemon {
     void noteWindowResult(const char* outcome); // this window has shown the user something
 
     void closePttWindow();      // flush + settle + disarm the PTT deadline (single path)
+
+    // Hand the WHOLE open PTT window to the transcript tier (see PttWindow.hpp). Runs at
+    // most once per window; a window with no speech in it is left for closePttWindow to
+    // report as `no-speech`. `why` is logged so the journal says which trigger fired.
+    void finalizePttUtterance(const char* why);
 
     // ---- periodic ----
     void tick(); // ~4 Hz: compositor poll cadence + listen timeout
@@ -98,6 +107,13 @@ class CDaemon {
     // Opt-in capture forensics (debug.dump_audio_dir). Disabled — and inert — unless the
     // operator sets a directory; see AudioDump.hpp for what it answers and why.
     CAudioDump m_dump;
+
+    // The whole audio of the open PTT window. Live only while m_pttWholeWindow — the
+    // wake-word path is unchanged and still segments on VAD onset.
+    CPttWindow m_pttAudio;
+    bool       m_pttWholeWindow = false; // this window is transcribed whole
+    bool       m_pttSpent       = false; // ...and it already was (no second transcript)
+    int64_t    m_pttVadOnsetMs  = 0;     // VAD's onset inside this window, 0 = never fired
 
     SEnvSignal m_env{};
     int64_t    m_lastPollMs   = 0;

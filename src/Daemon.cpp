@@ -28,19 +28,18 @@ CDaemon::~CDaemon() {
 }
 
 void CDaemon::resetVad() {
-    SVadConfig vc;
-    vc.sampleRate      = m_cfg.audio.sampleRate;
-    vc.energyThreshold = m_cfg.vad.energyThreshold;
-    vc.startMs         = m_cfg.vad.startMs;
-    vc.endMs           = m_cfg.vad.endMs;
-    vc.maxUtteranceMs  = m_cfg.vad.maxUtteranceMs;
-    vc.preRollMs       = m_cfg.vad.preRollMs;
-    vc.onsetBackpadMs  = m_cfg.vad.onsetBackpadMs;
-    vc.adaptive        = m_cfg.vad.adaptive;
-    vc.noiseFloorFactor = m_cfg.vad.noiseFloorFactor;
-    vc.noiseWindowMs   = m_cfg.vad.noiseWindowMs;
-    m_vad              = std::make_unique<CVad>(vc);
+    const SVadConfig vc = Pipeline::vadConfig(m_cfg);
+    m_vad               = std::make_unique<CVad>(vc);
+    // The PTT buffer scales its presence verdict and its length cap off the same numbers.
+    m_pttAudio.configure(vc);
     m_dump.noteVadConfig(vc);
+}
+
+// A PUSH-TO-TALK window is open: the machine is Listening and a press (not the wake
+// word) is what opened it. Asked in enough places that it earns a name.
+bool CDaemon::pttListening() const {
+    return m_machine.state() == EState::Listening &&
+           m_machine.currentActivation() == EActivation::PushToTalk;
 }
 
 bool CDaemon::init(const std::string& configPath, std::string& err) {
@@ -191,11 +190,64 @@ void CDaemon::drainAudio() {
     std::vector<SSpeechSegment> segs;
     for (auto& c : local) {
         m_dump.appendWindow(c.samples.data(), c.samples.size(), c.monoMs);
+        if (m_pttWholeWindow && m_pttSpent)
+            continue; // this window already produced its transcript; audio goes nowhere
+        if (m_pttWholeWindow)
+            m_pttAudio.push(c.samples.data(), c.samples.size(), c.monoMs);
         m_vad->push(c.samples.data(), c.samples.size(), c.monoMs, segs);
     }
-    for (auto& s : segs)
-        handleSegment(s);
+
+    if (m_pttWholeWindow) {
+        // The VAD no longer decides WHAT is transcribed here — only WHEN. A completed
+        // segment means the speaker stopped, so the whole window goes to whisper now
+        // rather than waiting out a toggle the user may have forgotten to press.
+        if (!segs.empty() && !m_pttSpent) {
+            m_pttVadOnsetMs = segs.front().onsetMs;
+            finalizePttUtterance("vad endpoint");
+        }
+    } else {
+        for (auto& s : segs)
+            handleSegment(s);
+    }
     updateListeningHud(); // reflect the latest VAD in-speech state on the HUD.
+}
+
+// How long an already-transcribed PTT window lingers before it auto-closes. The shipped
+// bind is `ptt toggle`, so the user's second press is what normally closes the window;
+// after an early endpoint that press must still land on an OPEN window (otherwise it
+// would open a fresh one and the daemon would sit listening at nothing). Lingering keeps
+// the toggle honest, and the timer closes the mic promptly when no press arrives.
+static constexpr int64_t kPttSpentLingerMs = 2000;
+
+void CDaemon::finalizePttUtterance(const char* why) {
+    if (!m_pttWholeWindow || m_pttSpent)
+        return;
+    m_pttSpent = true;
+
+    SPttUtterance u = m_pttAudio.finish();
+    Log::log(Log::DEBUG,
+             "ptt window ({}): {}ms captured, speech={} ({}ms over thr {:.4f}; floor {:.4f} peak {:.4f}){}",
+             why, u.endMs - u.startMs, u.speech ? "yes" : "no", u.presence.voicedMs,
+             u.presence.threshold, u.presence.floorRms, u.presence.peakRms,
+             u.truncated ? " [truncated to max_utterance_ms]" : "");
+
+    // Nothing audible anywhere in the window: let closePttWindow's !m_windowProduced path
+    // say "didn't hear anything" rather than spending a whisper pass on silence.
+    if (!u.speech)
+        return;
+
+    SSpeechSegment seg;
+    seg.bufferStartMs = u.startMs;
+    seg.endMs         = u.endMs;
+    // Anchor on the VAD's onset when it fired (a better instant for gaze than the press),
+    // else on the window itself. Word timestamps are offset from bufferStartMs regardless.
+    seg.onsetMs = (m_pttVadOnsetMs > u.startMs && m_pttVadOnsetMs < u.endMs) ? m_pttVadOnsetMs : u.startMs;
+    seg.samples = std::move(u.samples);
+    handleSegment(seg);
+
+    // Early endpoint: keep the window open just long enough for the toggle's second press.
+    if (m_pttDeadlineMs != 0)
+        m_pttDeadlineMs = Clock::monotonicMs() + kPttSpentLingerMs;
 }
 
 void CDaemon::handleSegment(const SSpeechSegment& seg) {
@@ -206,7 +258,7 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
              seg.endMs - seg.onsetMs, seg.backpadMs(), seg.samples.size());
     m_dump.noteSegment(seg);
 
-    const bool pttWindow = m_machine.state() == EState::Listening && m_machine.currentActivation() == EActivation::PushToTalk;
+    const bool pttWindow = pttListening();
     const bool requireWake = !pttWindow;
     const EActivation act = pttWindow ? EActivation::PushToTalk : EActivation::WakeWord;
 
@@ -321,18 +373,38 @@ void CDaemon::startCapture(const std::string& source) {
 void CDaemon::openCaptureWindow() {
     resetVad();
     m_dump.beginWindow(Clock::monotonicMs());
+
+    // A PRESS is an explicit declaration that speech is coming, so this window is
+    // transcribed WHOLE and the VAD is demoted to endpointing (see PttWindow.hpp). The
+    // wake-word gate, which has no press to trust, keeps the onset-segmented path.
+    m_pttWholeWindow = m_cfg.capture.pttWholeWindow && pttListening();
+    m_pttSpent       = false;
+    m_pttVadOnsetMs  = 0;
+    if (m_pttWholeWindow)
+        m_pttAudio.begin();
+
     std::vector<float> pre;
     int64_t            preStartMs = 0;
     const size_t       n          = m_preRoll.drain(pre, preStartMs);
     if (n == 0)
         return;
     m_dump.notePreRoll(pre.data(), pre.size(), preStartMs);
+    if (m_pttWholeWindow)
+        m_pttAudio.push(pre.data(), pre.size(), preStartMs);
     std::vector<SSpeechSegment> segs;
     m_vad->push(pre.data(), pre.size(), preStartMs, segs);
     // The ring is shorter than an utterance, but a segment CAN close inside it if the
     // user spoke and stopped before the key even registered — keep it rather than drop it.
-    for (auto& s : segs)
-        handleSegment(s);
+    // In a whole-window PTT window that is an endpoint signal, not a transcript unit.
+    if (m_pttWholeWindow) {
+        if (!segs.empty()) {
+            m_pttVadOnsetMs = segs.front().onsetMs;
+            finalizePttUtterance("vad endpoint in pre-roll");
+        }
+    } else {
+        for (auto& s : segs)
+            handleSegment(s);
+    }
     Log::log(Log::DEBUG, "capture window opened with {}ms of pre-roll",
              (n * 1000) / static_cast<size_t>(m_cfg.audio.sampleRate));
 }
@@ -370,6 +442,14 @@ void CDaemon::applyMicPolicy() {
         // honest (no "listening…" merely because the wake word is armed).
     } else if (!active && m_captureActive) {
         m_captureActive = false;
+        // closePttWindow() always finalizes before the machine leaves Listening, so by the
+        // time the gate shuts there is nothing left to transcribe; drop the buffer so a
+        // window that ended some other way cannot leak audio into the next one.
+        if (m_pttWholeWindow) {
+            m_pttAudio.finish();
+            m_pttWholeWindow = false;
+            m_pttSpent       = false;
+        }
         m_dump.endWindow(m_lastOutcome, m_lastText);
         m_preRoll.clear(); // start the next window's pre-roll from post-window audio only
         updateListeningHud(); // gate closed → drop any listening panel we own.
@@ -387,9 +467,7 @@ void CDaemon::updateListeningHud() {
     // Honest mapping: show "listening…" only while we are ACTUALLY capturing an
     // utterance — VAD in-speech (wake or PTT), or a freshly opened PTT window before
     // onset. ARMED_WAKEWORD alone shows nothing (see applyMicPolicy).
-    const bool pttOpen = m_machine.state() == EState::Listening &&
-                         m_machine.currentActivation() == EActivation::PushToTalk;
-    const bool capturing = (m_vad && m_vad->inSpeech()) || pttOpen;
+    const bool capturing = (m_vad && m_vad->inSpeech()) || pttListening();
 
     if (!capturing) {
         if (m_hudListening) {
@@ -420,10 +498,12 @@ void CDaemon::tick() {
     // deadline. The deadline is armed when the window OPENS (closePttWindow / onPttStart)
     // and cleared when it closes, so it can never fire on a stale timestamp or stack
     // across repeated toggles.
-    if (m_pttDeadlineMs != 0 && m_machine.state() == EState::Listening &&
-        m_machine.currentActivation() == EActivation::PushToTalk) {
+    if (m_pttDeadlineMs != 0 && pttListening()) {
         if (now >= m_pttDeadlineMs) {
-            Log::log(Log::WARN, "PTT window timed out; closing");
+            // Not a warning when the window already said its piece and was merely waiting
+            // out the toggle's second press.
+            Log::log(m_pttSpent ? Log::DEBUG : Log::WARN, "PTT window {}; closing",
+                     m_pttSpent ? "linger elapsed" : "timed out");
             closePttWindow();
         }
     }
@@ -474,10 +554,23 @@ void CDaemon::tick() {
 // deadline is always cleared (no stacking) whether the close came from `ptt stop`,
 // `ptt toggle`, or the timeout.
 void CDaemon::closePttWindow() {
+    // Closing a window that is not open must not manufacture a "didn't hear anything":
+    // a stray `ptt stop` (or a second one after a timeout) has nothing to report.
+    if (!pttListening()) {
+        m_pttDeadlineMs  = 0;
+        m_windowProduced = false;
+        return;
+    }
     drainAudio();
-    std::vector<SSpeechSegment> segs;
-    if (m_vad && m_vad->flush(segs))
-        for (auto& s : segs) handleSegment(s);
+    if (m_pttWholeWindow) {
+        // The whole window IS the utterance; the VAD's in-progress segment is irrelevant.
+        finalizePttUtterance("window closed");
+        m_pttWholeWindow = false;
+    } else {
+        std::vector<SSpeechSegment> segs;
+        if (m_vad && m_vad->flush(segs))
+            for (auto& s : segs) handleSegment(s);
+    }
     m_machine.onPttStop();
     m_machine.onTranscribeDone();
     m_pttDeadlineMs = 0;
@@ -501,8 +594,7 @@ std::string CDaemon::handleControl(const std::string& cmd) {
         // "now" on every open (the mic may already have been open in ARMED_WAKEWORD, in
         // which case applyMicPolicy would not have refreshed a start marker) so the
         // window gets its full duration and never times out on a stale timestamp.
-        if (m_machine.state() == EState::Listening &&
-            m_machine.currentActivation() == EActivation::PushToTalk)
+        if (pttListening())
             m_pttDeadlineMs = Clock::monotonicMs() + m_cfg.vad.maxUtteranceMs + 5000;
         applyMicPolicy();
         updateListeningHud();
@@ -517,8 +609,7 @@ std::string CDaemon::handleControl(const std::string& cmd) {
         // True toggle: a second press while a PTT window is open CLOSES it. Only a
         // PTT-initiated window is toggled off — a wake-word capture in progress is left
         // to VAD, not cut short by the PTT key.
-        if (m_machine.state() == EState::Listening &&
-            m_machine.currentActivation() == EActivation::PushToTalk)
+        if (pttListening())
             return handleControl("ptt stop");
         return handleControl("ptt start");
     }
@@ -543,6 +634,9 @@ std::string CDaemon::statusJson() const {
     o += ",\"captureHeld\":" + std::string(m_audio.running() && !m_captureActive ? "true" : "false");
     o += ",\"captureState\":\"" + std::string(m_audio.stateName()) + "\"";
     o += ",\"preRollMs\":" + std::to_string(m_cfg.capture.preRollMs);
+    // Is the OPEN window one that will be transcribed whole (PTT), rather than sliced by
+    // VAD onset? Round-4 diagnosis wants this in one place with the rest of the capture state.
+    o += ",\"pttWholeWindow\":" + std::string(m_pttWholeWindow ? "true" : "false");
     o += ",\"preRollBufferedMs\":" + std::to_string(m_preRoll.bufferedMs());
     // Live audio observability: input level (rolling ~1 s), VAD state, and the
     // frames-received counter — enough to tell a silent source from a dead path.

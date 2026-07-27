@@ -44,14 +44,44 @@ sample_rate = 16000
 hold = true
 preroll_ms = 1000       # rolling pre-roll spliced in front of a new window; 0 disables it
 
+# Transcribe the WHOLE push-to-talk window rather than the slice the VAD picked out of it.
+# A press is an explicit declaration that speech is coming, so nothing about what reaches
+# whisper is gated on onset detection; the VAD is demoted to (a) endpointing early, so a
+# short utterance need not wait out the window, and (b) a much more forgiving "was there
+# anything at all in this window" verdict. Live round 3 lost "focus" out of "focus the
+# browser" and dropped "workspace three" entirely to the onset gate, with both plainly
+# audible in the dumped window audio. Set false to restore the old per-segment behaviour.
+ptt_whole_window = true
+
 [vad]
 # Energy-gated voice activity detection. Raise energy_threshold if background noise
 # false-triggers; lower it if quiet speech is missed.
-energy_threshold = 0.012
+#
+# 0.006 and not 0.012: the Quest/WiVRn headset mic is unprocessed (no AGC). Across all
+# seven capture windows dumped in live round 3 its ambient sits at a 20th-percentile frame
+# RMS of ~0.0002 while speech peaks at only ~0.03, and at 0.012 a whole spoken word could
+# put less than start_ms of audio over the gate. The adaptive gating below — not this
+# number — is what protects a hot source.
+energy_threshold = 0.006
 start_ms = 150          # sustained voiced audio before declaring speech onset
 end_ms = 600            # trailing silence (hangover) before ending an utterance
 max_utterance_ms = 12000
 pre_roll_ms = 300       # raw depth of the idle retention ring
+
+# How long an unvoiced DIP inside the onset run may last before the run is thrown away.
+# start_ms used to require that many CONSECUTIVE voiced frames, which no real word
+# delivers — "focus" has a stop gap before its /k/, "workspace" one before its /sp/ — so a
+# short quiet word could never declare onset at all. The run now PAUSES across a short gap
+# instead of resetting; only voiced frames count toward start_ms, so the gate is no looser
+# on noise. Replaying the live "focus the browser" window, 100 ms moves onset 2.82 s (the
+# word "browser") back to 2.04 s (the word "focus").
+gap_tolerance_ms = 100
+
+# How much energetic audio ANYWHERE in a push-to-talk window counts as "somebody spoke".
+# Only used by ptt_whole_window, and only to keep several seconds of pure silence away
+# from whisper — it needs no contiguity and gates below the detector itself, so anything
+# that might be speech is transcribed and left for the intent tier to reject.
+presence_ms = 100
 
 # Audio GUARANTEED to sit in front of the DECLARED onset instant. This is NOT the same
 # thing as pre_roll_ms: the ring is fed every idle frame, including the start_ms of

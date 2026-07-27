@@ -169,6 +169,8 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.capture.hold, val);
         } else if (k == "capture.preroll_ms") {
             setInt(out.capture.preRollMs, val);
+        } else if (k == "capture.ptt_whole_window") {
+            setBool(out.capture.pttWholeWindow, val);
         } else if (k == "vad.energy_threshold") {
             setFloat(out.vad.energyThreshold, val);
         } else if (k == "vad.start_ms") {
@@ -181,6 +183,10 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setInt(out.vad.preRollMs, val);
         } else if (k == "vad.onset_backpad_ms") {
             setInt(out.vad.onsetBackpadMs, val);
+        } else if (k == "vad.gap_tolerance_ms") {
+            setInt(out.vad.gapToleranceMs, val);
+        } else if (k == "vad.presence_ms") {
+            setInt(out.vad.presenceMs, val);
         } else if (k == "vad.adaptive") {
             setBool(out.vad.adaptive, val);
         } else if (k == "vad.noise_floor_factor") {

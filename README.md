@@ -77,11 +77,12 @@ values are directly comparable.
 
 ### Intent tier + executor (WP-V4)
 
-Each transcript is turned into a **typed, closed-schema command** (`SAction`, 15 verbs)
+Each transcript is turned into a **typed, closed-schema command** (`SAction`, 16 verbs)
 and then an allowlisted `hyprctl` plan. Twelve verbs drive the XR layer (pick, place,
-move, center, dock/undock, follow, anchor, hand input, launch); three drive plain
+move, center, dock/undock, follow, anchor, hand input, launch); four drive plain
 Hyprland window management — **focus** ("focus the browser"), **fullscreen** ("make this
-window fullscreen"), and **workspace** ("workspace three"). The window verbs are
+window fullscreen"), **workspace** ("workspace three"), and **move_window** ("move
+terminal to the left monitor", "send the browser to workspace 3"). The window verbs are
 non-destructive and reversible, so they are permitted by default (`executor.allow_window`).
 
 - **Desktop-context snapshot** at utterance time — `hyprctl monitors -j` + `clients -j` +
@@ -97,11 +98,17 @@ non-destructive and reversible, so they are permitted by default (`executor.allo
   small **closed** generic-noun table intersected with the LIVE window list, so a spoken
   noun can only ever select an app that is actually running. The chosen window is
   dispatched at its **address**, never `class:` — Hyprland reads a class as a regex.
+- **Spatial monitor references** — "the **left** monitor" is a claim about the layout,
+  not about a name, so it resolves by x coordinate from `monitors -j` (leftmost /
+  rightmost). Two monitors sharing the extreme x is genuinely ambiguous and asks rather
+  than picking; one monitor cannot answer at all. A move therefore never lands somewhere
+  the user did not name.
 - **Executor** — a pure map from `SAction` to a plan of `hyprctl openxr …` /
-  `dispatch exec|focuswindow|focusmonitor|fullscreen|workspace …` argv, behind a **STRICT
-  allowlist**: a closed dispatcher set with each argument *shape* checked (an address must
-  be hex, a workspace must be 1–99, fullscreen must be 0/1), and transcript text is never
-  interpolated into a command line. **`executor.dry_run` defaults true** — it logs the
+  `dispatch exec|focuswindow|focusmonitor|fullscreen|workspace|movewindow|movetoworkspace …`
+  argv, behind a **STRICT allowlist**: a closed dispatcher set with each argument *shape*
+  checked (an address must be hex, a workspace must be 1–99, fullscreen must be 0/1, a
+  move destination must be `mon:<name>` over a boring charset), and transcript text is
+  never interpolated into a command line. **`executor.dry_run` defaults true** — it logs the
   exact argv and actuates nothing until you flip it off.
 
 Two spoken interactions need compositor verbs that don't exist yet (targeted grab,
@@ -204,6 +211,37 @@ been in the buffer the whole time.
 `max(pre_roll_ms, onset_backpad_ms + start_ms)`, and every emitted segment carries at least
 that much audio ahead of its onset. `hypxrvoiced` logs the achieved back-pad for every
 segment, so the journal alone distinguishes "cut short" from "never arrived".
+
+### A push-to-talk window is transcribed WHOLE
+
+The back-pad fixed the *retention*; live round 3 showed the remaining loss was the
+*onset criterion itself*. `vad.start_ms` demanded that many **consecutive** voiced frames,
+and no real word delivers that — "focus" has a stop gap before its /k/, "workspace" one
+before its /sp/. In one six-utterance round that cost two commands outright: "focus the
+browser" onset at the word *browser* (whisper heard "The browser."), and "workspace three"
+produced no segment at all (`no-speech`) with ~400 ms of speech plainly in the window wav.
+
+Two changes, both driven by measurements off those dumps:
+
+- **`vad.gap_tolerance_ms`** (default 100) lets the onset run *pause* across a short
+  unvoiced dip instead of resetting. Only voiced frames count toward `start_ms`, so the
+  gate is no looser on noise. Replaying the live window, this alone moves onset from
+  2.82 s back to 2.04 s — from "browser" to "focus".
+- **`capture.ptt_whole_window`** (default true) stops gating the PTT path on onset at all.
+  A press is an explicit declaration that speech is coming, so the utterance handed to
+  whisper *is* the window: pre-roll splice through release, minus an obviously-dead tail,
+  capped at `vad.max_utterance_ms`. The VAD keeps two jobs — endpointing early (so a short
+  command need not wait out the toggle) and a deliberately forgiving "was there anything
+  in this window at all" verdict (`vad.presence_ms`) that gates *below* the detector's own
+  threshold. When in doubt it transcribes: whisper returning noise and the intent tier
+  rejecting it is a fine outcome; silently eating speech is not.
+
+The wake-word path is unchanged apart from the gap tolerance — it has no press to trust,
+so it still segments on onset.
+
+`vad.energy_threshold` also dropped 0.012 → **0.006**: the Quest/WiVRn mic is unprocessed,
+its measured ambient across all seven dumped windows is ~0.0002 RMS and its speech peaks
+only ~0.03. The adaptive floor, not the fixed one, is what protects a hot source.
 
 ### Capture forensics (`debug.dump_audio_dir`, off by default)
 
@@ -313,8 +351,15 @@ hypxrvoiced --oneshot tests/assets/jfk.wav --model models/ggml-base.en.bin
 runs the full VAD → ASR → transcript pipeline on an audio file (no microphone) and prints
 each utterance as a JSON line with `onsetMs` and per-word timestamps. This is the path the
 acceptance test drives. Add `--intent` to also run each transcript through the intent tier
-+ executor (honours `executor.dry_run`). To drive the intent tier directly on a text
-utterance (no audio):
++ executor (honours `executor.dry_run`), or `--ptt` to treat the file as **one push-to-talk
+window** (whole-window transcription) — which is how a dumped capture window is replayed
+against the live grammar:
+
+```sh
+hypxrvoiced --oneshot ~/dumps/20260727-000946.288-w15327740-window.wav --ptt --intent
+```
+
+To drive the intent tier directly on a text utterance (no audio):
 
 ```sh
 hypxrvoiced --intent-text "move the coding monitor closer"

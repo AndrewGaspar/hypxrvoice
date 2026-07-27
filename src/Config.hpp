@@ -43,14 +43,30 @@ struct SConfig {
     struct {
         bool hold      = true; // keep the stream connected across windows (headset only)
         int  preRollMs = 1000; // rolling pre-roll spliced in front of a new window; 0 = off
+        // Transcribe the WHOLE push-to-talk window instead of the VAD's slice of it. A
+        // PTT press is an explicit declaration that speech is coming, so nothing about
+        // what reaches whisper is gated on onset detection; the VAD is demoted to early
+        // endpointing plus a forgiving no-speech verdict. See PttWindow.hpp for the two
+        // round-3 live failures this closes. Off restores the pre-round-3 behaviour.
+        bool pttWholeWindow = true;
     } capture;
 
     struct {
-        float energyThreshold = 0.012f; // RMS floor: a frame below this is always silence
+        // RMS floor: a frame below this is always silence. Lowered from 0.012 in round 3
+        // — the Quest/WiVRn mic is unprocessed, its measured ambient is ~0.0002 and its
+        // speech peaks only ~0.03, so 0.012 gated out whole quiet words. See
+        // SVadConfig::energyThreshold for the per-window numbers.
+        float energyThreshold = 0.006f;
         int   startMs         = 150;    // sustained voiced to declare onset
         int   endMs           = 600;    // sustained silence (hangover) to end
         int   maxUtteranceMs  = 12000;
         int   preRollMs       = 300;    // raw depth of the VAD's idle retention ring
+        // How long an unvoiced dip inside the onset run may last before the run resets.
+        // Words have internal stops; demanding start_ms of CONSECUTIVE voiced frames made
+        // short choppy words ("focus", "workspace") structurally undetectable.
+        int   gapToleranceMs  = 100;
+        // Energetic audio anywhere in a PTT window that counts as "somebody spoke".
+        int   presenceMs      = 100;
         // Audio GUARANTEED to precede the declared onset instant. Not the same thing as
         // pre_roll_ms — see SVadConfig::onsetBackpadMs for why the old key delivered only
         // (pre_roll_ms - start_ms) and structurally lost quiet first syllables.

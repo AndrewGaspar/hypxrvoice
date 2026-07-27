@@ -16,12 +16,41 @@
 // interface below is the seam where a silero backend would drop in later.
 struct SVadConfig {
     int   sampleRate      = 16000;
-    float energyThreshold = 0.012f; // RMS floor: a frame below this is ALWAYS silence
+    // RMS floor: a frame below this is ALWAYS silence.
+    //
+    // WHY 0.006 AND NOT 0.012 (round-3 live measurement): all seven capture windows
+    // dumped from a Quest 3 / WiVRn session have a 20th-percentile frame RMS of
+    // 0.00015–0.00018 (the source is digitally silent between words) and speech PEAKS of
+    // only 0.029–0.042 — an unprocessed headset mic with no AGC. At 0.012 the utterance
+    // "workspace three" put just 140 ms of frames over the gate in TOTAL, less than the
+    // 150 ms start_ms run, so onset never fired and the window was scored `no-speech`
+    // while the wav plainly contains the words. 0.006 is still ~30x that measured floor,
+    // and the adaptive term below is what actually protects a hot source.
+    float energyThreshold = 0.006f;
     int   startMs         = 150;    // sustained voiced to declare onset
     int   endMs           = 600;    // sustained silence (hangover) to declare end
     int   maxUtteranceMs  = 12000;
     int   preRollMs       = 300;    // raw depth of the idle retention ring
     int   frameMs         = 20;     // analysis window
+
+    // How long an unvoiced DIP inside the onset run may last before the run is thrown
+    // away (round-3 live finding). startMs used to demand startMs of CONSECUTIVE voiced
+    // frames, which no real word delivers: "focus" has a stop gap before the /k/ and
+    // "workspace" one before the /sp/, so each dip reset the counter to zero and the
+    // detector waited for a later, louder word — the dumped window for "focus the
+    // browser" declared onset at 2.82 s ("browser") when "focus" had been sitting at
+    // 2.04 s. With a tolerance the run PAUSES across a short gap instead of resetting.
+    // Only voiced frames count toward startMs, so the gate is no looser on noise (a lone
+    // spike still needs startMs of real voicing) — but a choppy word finally survives.
+    // Replaying that live wav through the detector, 100 ms moves onset 2.82 s -> 2.04 s.
+    int   gapToleranceMs  = 100;
+
+    // How much energetic audio ANYWHERE in a buffer counts as "somebody spoke", for the
+    // whole-buffer verdict used by the PTT path (see detectSpeechPresence). This is not
+    // an onset criterion — it need not be contiguous and it deliberately gates lower than
+    // the VAD itself. Its only job is to keep several seconds of pure silence away from
+    // whisper; anything that might be speech is transcribed.
+    int   presenceMs      = 100;
 
     // Audio GUARANTEED to sit in front of the DECLARED ONSET instant.
     //
@@ -69,6 +98,29 @@ struct SSpeechSegment {
     int64_t backpadMs() const { return onsetMs - bufferStartMs; }
 };
 
+// The whole-buffer "did anybody say anything?" verdict.
+//
+// WHY IT EXISTS (round-3 design decision): a PTT press is an EXPLICIT declaration that
+// speech is coming, so the PTT path no longer asks the VAD which slice of the window to
+// transcribe — it hands whisper the whole window (CPttWindow). The only thing still worth
+// deciding is whether the window is worth transcribing AT ALL, and that decision must be
+// far more forgiving than onset detection: it scans the entire buffer, needs no
+// contiguity, and gates at HALF the fixed energy floor (or 1.5x the buffer's own noise
+// floor, whichever is larger — always <= the VAD's own threshold, by construction). If it
+// is wrong, whisper returns junk and the intent tier rejects it; that is a fine outcome.
+// Silently eating speech is not.
+struct SSpeechPresence {
+    bool  found     = false;
+    int   voicedMs  = 0; // total ms of frames over `threshold`, anywhere in the buffer
+    float floorRms  = 0.f; // 20th-percentile frame RMS (the buffer's own ambient)
+    float peakRms   = 0.f; // loudest frame RMS
+    float threshold = 0.f; // the gate that produced `voicedMs`
+};
+
+// Scan `n` mono samples for speech presence per the rules above. Pure — no state, no
+// allocation beyond one RMS vector — so it is directly unit-testable.
+SSpeechPresence detectSpeechPresence(const float* samples, size_t n, const SVadConfig& cfg);
+
 class CVad {
   public:
     explicit CVad(const SVadConfig& cfg);
@@ -115,6 +167,7 @@ class CVad {
 
     bool               m_inSpeech    = false;
     int                m_voicedRunMs = 0;
+    int                m_runGapMs    = 0; // unvoiced ms accumulated INSIDE the onset run
     int                m_silenceRunMs = 0;
     int64_t            m_runStartMs   = 0; // onset candidate time
     int64_t            m_onsetMs      = 0;

@@ -9,6 +9,7 @@
 #include "IntentPipeline.hpp"
 #include "Log.hpp"
 #include "Pipeline.hpp"
+#include "PttWindow.hpp"
 #include "Vad.hpp"
 #include "Wav.hpp"
 
@@ -33,6 +34,9 @@ static void printUsage(const char* argv0) {
                  "                      transcript as a JSON line, then exit.\n"
                  "  --intent            With --oneshot: also run each transcript through the\n"
                  "                      intent tier + executor (honours executor.dry_run).\n"
+                 "  --ptt               With --oneshot: treat the file as ONE push-to-talk\n"
+                 "                      window (whole-window transcription), the exact path a\n"
+                 "                      press takes — for replaying dumped capture windows.\n"
                  "  --intent-text <s>   Debug: run the intent tier + executor on the given\n"
                  "                      utterance text (no audio) and exit.\n"
                  "  --model <path>      Override asr.model (whisper ggml model path).\n"
@@ -46,7 +50,7 @@ static void printUsage(const char* argv0) {
 
 // Offline pipeline: file -> VAD segments -> ASR -> transcripts. Shares the exact
 // segment path with the live daemon (Pipeline::processSegment).
-static int runOneshot(const std::string& file, const SConfig& cfg, bool runIntent) {
+static int runOneshot(const std::string& file, const SConfig& cfg, bool runIntent, bool asPtt) {
     CAsr          asr;
     std::string   err;
     CAsr::SParams ap{cfg.asr.model, cfg.asr.language, cfg.asr.threads, cfg.asr.translate};
@@ -78,28 +82,45 @@ static int runOneshot(const std::string& file, const SConfig& cfg, bool runInten
     }
     Log::log(Log::INFO, "loaded {} ({} samples @16kHz, {:.2f}s)", file, audio.size(), audio.size() / 16000.0);
 
-    SVadConfig vc;
-    vc.sampleRate      = 16000;
-    vc.energyThreshold = cfg.vad.energyThreshold;
-    vc.startMs         = cfg.vad.startMs;
-    vc.endMs           = cfg.vad.endMs;
-    vc.maxUtteranceMs  = cfg.vad.maxUtteranceMs;
-    vc.preRollMs       = cfg.vad.preRollMs;
-    vc.adaptive        = cfg.vad.adaptive;
-    vc.noiseFloorFactor = cfg.vad.noiseFloorFactor;
-    vc.noiseWindowMs   = cfg.vad.noiseWindowMs;
-    CVad vad(vc);
+    SVadConfig vc = Pipeline::vadConfig(cfg);
+    vc.sampleRate = 16000;
 
     // Anchor the file's virtual capture start to "now" so onset/word timestamps are
     // real CLOCK_MONOTONIC values, exactly like a live capture.
-    const int64_t             base = Clock::monotonicMs();
+    const int64_t               base = Clock::monotonicMs();
     std::vector<SSpeechSegment> segs;
-    vad.push(audio.data(), audio.size(), base, segs);
-    vad.flush(segs);
 
-    if (segs.empty()) {
-        Log::log(Log::WARN, "VAD found no speech in {} (try lowering vad.energy_threshold)", file);
-        return 2;
+    if (asPtt) {
+        // --ptt: the file IS one push-to-talk window. Same path a press takes in the
+        // daemon — the whole window goes to whisper and the VAD only gets a vote on
+        // whether there was anything in it at all. This is how a dumped capture window
+        // (debug.dump_audio_dir) is replayed against the live grammar.
+        CPttWindow win;
+        win.configure(vc);
+        win.begin();
+        win.push(audio.data(), audio.size(), base);
+        SPttUtterance u = win.finish();
+        Log::log(Log::INFO, "ptt window: {}ms, speech={} ({}ms over thr {:.4f}; floor {:.4f} peak {:.4f})",
+                 u.endMs - u.startMs, u.speech ? "yes" : "no", u.presence.voicedMs,
+                 u.presence.threshold, u.presence.floorRms, u.presence.peakRms);
+        if (!u.speech) {
+            Log::log(Log::WARN, "no speech anywhere in {}", file);
+            return 2;
+        }
+        SSpeechSegment seg;
+        seg.bufferStartMs = u.startMs;
+        seg.onsetMs       = u.startMs;
+        seg.endMs         = u.endMs;
+        seg.samples       = std::move(u.samples);
+        segs.push_back(std::move(seg));
+    } else {
+        CVad vad(vc);
+        vad.push(audio.data(), audio.size(), base, segs);
+        vad.flush(segs);
+        if (segs.empty()) {
+            Log::log(Log::WARN, "VAD found no speech in {} (try lowering vad.energy_threshold)", file);
+            return 2;
+        }
     }
 
     int emitted = 0;
@@ -173,6 +194,7 @@ int main(int argc, char** argv) {
     std::string modelOverride;
     std::string intentText;
     bool        oneshotIntent = false;
+    bool        oneshotPtt    = false;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -192,6 +214,8 @@ int main(int argc, char** argv) {
             oneshot = needVal("--oneshot");
         } else if (a == "--intent") {
             oneshotIntent = true;
+        } else if (a == "--ptt") {
+            oneshotPtt = true;
         } else if (a == "--intent-text") {
             intentText = needVal("--intent-text");
         } else if (a == "--model") {
@@ -222,7 +246,7 @@ int main(int argc, char** argv) {
         return runIntentText(intentText, cfg);
 
     if (!oneshot.empty())
-        return runOneshot(oneshot, cfg, oneshotIntent);
+        return runOneshot(oneshot, cfg, oneshotIntent, oneshotPtt);
 
     // Daemon mode.
     struct sigaction sa = {};
