@@ -42,7 +42,7 @@ class CDaemon {
 
     // ---- mic gating ----
     //
-    // Two independent decisions since WP-V6 (see PreRoll.hpp for why):
+    // Two independent decisions (see PreRoll.hpp for why):
     //   captureShouldBeHeld() — is the PipeWire STREAM connected? Held across windows in
     //                           a headset session, so a PTT press never pays the ~1 s
     //                           connect + `wivrn.source` resume that ate the first word.
