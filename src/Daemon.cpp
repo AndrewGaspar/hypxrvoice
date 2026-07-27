@@ -53,6 +53,7 @@ bool CDaemon::init(const std::string& configPath, std::string& err) {
 
     m_machine.configure(m_cfg.activation.mode, m_cfg.activation.fallback);
     resetVad();
+    m_preRoll.configure(m_cfg.audio.sampleRate, m_cfg.capture.preRollMs);
 
     // ASR model load is non-fatal: the daemon still runs (control/status work) so
     // the user can fetch a model and `reload`. Transcription is a no-op until then.
@@ -160,8 +161,17 @@ void CDaemon::drainAudio() {
         std::lock_guard<std::mutex> lk(m_qMu);
         local.swap(m_queue);
     }
+    // THE GATE. While it is shut the frames are held ONLY in the pre-roll ring: no VAD,
+    // no ASR, no wake-word tier, nothing written anywhere. The stream may be connected
+    // (so the next window starts instantly) but this is what makes that harmless.
+    if (!m_captureActive) {
+        for (auto& c : local)
+            m_preRoll.push(c.samples.data(), c.samples.size(), c.monoMs);
+        return;
+    }
     if (!m_vad)
         return;
+
     std::vector<SSpeechSegment> segs;
     for (auto& c : local)
         m_vad->push(c.samples.data(), c.samples.size(), c.monoMs, segs);
@@ -177,19 +187,33 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
 
     if (!m_asr.loaded()) {
         Log::log(Log::WARN, "dropping {}ms segment — no ASR model loaded", seg.endMs - seg.onsetMs);
+        if (pttWindow) {
+            m_lastText = "";
+            noteWindowResult("asr-unavailable");
+            Feedback::emitRejected("", m_cfg, "no speech model loaded");
+        }
         return;
     }
 
     STranscript t;
     if (!Pipeline::processSegment(m_asr, m_cfg, seg, act, requireWake, t)) {
         Log::log(Log::DEBUG, "segment rejected (onset {}ms): not addressed / empty", seg.onsetMs);
+        // A PTT window is an EXPLICIT request — never let it end in silence. (A wake-word
+        // window that simply wasn't addressed to us stays quiet by design: that is the
+        // whole point of the wake phrase.)
+        if (pttWindow) {
+            m_lastText = t.text; // "" when ASR found nothing; verbatim otherwise
+            noteWindowResult(t.text.empty() ? "no-speech" : "unparsed");
+            Feedback::emitRejected(t.text, m_cfg);
+        }
         return;
     }
     m_lastText    = t.text;
     m_lastOnsetMs = t.onsetMs;
     // A real transcript/action panel now owns the HUD; relinquish the listening panel
-    // so updateListeningHud() won't hide the action out from under it.
-    m_hudListening = false;
+    // so updateListeningHud() won't hide the action out from under it — or raise a stale
+    // "listening…" back over it while the PTT key is still down.
+    noteWindowResult("ok");
     Feedback::emitTranscript(t, m_cfg);
 
     // WP-V4 intent tier: transcript -> context snapshot -> command -> executor. Uses
@@ -206,6 +230,10 @@ void CDaemon::handleSegment(const SSpeechSegment& seg) {
                                          defaultRunner, backend);
         m_lastAction = std::string(verbName(r.action.verb)) +
                        (r.action.target.empty() ? "" : " " + r.action.target);
+        // The intent tier owns the HUD from here: EVerb::None means it showed the
+        // transcript back as a rejection panel, which `status` should say too.
+        if (r.action.verb == EVerb::None)
+            m_lastOutcome = "unparsed";
     }
 }
 
@@ -217,23 +245,109 @@ std::string CDaemon::chooseSource() const {
     return m_cfg.audio.source;
 }
 
-void CDaemon::applyMicPolicy() {
-    const bool want = m_machine.micShouldBeOpen();
-    if (want && !m_audio.running()) {
+// Should the PipeWire stream stay CONNECTED even with the gate shut?
+//
+// Only for the headset mic. `wivrn.source` suspends the moment nothing reads it, and
+// resuming it makes the WiVRn server ask the headset client to start its microphone over
+// the network — the ~0.5–1 s that swallowed the leading verb of every PTT utterance. A
+// desk source opens locally and fast, so nothing is gained by holding it and the stricter
+// "no stream unless a window is open" stance is kept there.
+bool CDaemon::captureShouldBeHeld() const {
+    if (!m_cfg.capture.hold)
+        return false;
+    return m_env.headsetPresent && !m_cfg.audio.headsetSource.empty();
+}
+
+// (Re)connect the capture stream. The caller owns the backoff gate; this function ARMS
+// the next one unconditionally — including on success, because "connects then immediately
+// errors" (the WiVRn-source-vanished shape) is exactly the case that would otherwise be
+// retried at the 4 Hz tick rate forever. A stream that actually delivers PCM clears the
+// backoff again from tick().
+void CDaemon::startCapture(const std::string& source) {
+    const int64_t now = Clock::monotonicMs();
+
+    m_audio.stop(); // no-op when closed; also the teardown for a source change / failure
+    m_framesReceived.store(0, std::memory_order_relaxed);
+    m_inRms1e4.store(0, std::memory_order_relaxed);
+    m_inPeak1e4.store(0, std::memory_order_relaxed);
+    m_lastFrameCount   = 0;
+    m_lastFrameChangeMs = now;
+    m_preRoll.clear(); // pre-restart audio is not contiguous with what follows
+    if (m_captureActive)
         resetVad();
-        m_framesReceived.store(0, std::memory_order_relaxed);
-        m_inRms1e4.store(0, std::memory_order_relaxed);
-        m_inPeak1e4.store(0, std::memory_order_relaxed);
-        m_audio.start(chooseSource(), m_cfg.audio.sampleRate,
-                      [this](const float* f, size_t n, int64_t ms) { onAudio(f, n, ms); });
-        // NOTE: opening the mic does NOT mean "listening" — in ARMED_WAKEWORD the mic
-        // is open at DON but nothing is being transcribed. The listening panel is driven
-        // by updateListeningHud() from the actual utterance-capture signal, so the HUD
-        // stays honest (no "listening…" merely because the wake word is armed).
-    } else if (!want && m_audio.running()) {
+
+    const bool ok      = m_audio.start(source, m_cfg.audio.sampleRate,
+                                       [this](const float* f, size_t n, int64_t ms) { onAudio(f, n, ms); });
+    m_captureBackoffMs = m_captureBackoffMs > 0 ? std::min(m_captureBackoffMs * 2, 30000) : 1000;
+    m_captureRetryAtMs = now + m_captureBackoffMs;
+    if (!ok)
+        Log::log(Log::WARN, "audio capture unavailable (source '{}'); retrying in {}ms",
+                 source.empty() ? "default" : source, m_captureBackoffMs);
+}
+
+// The gate just opened. Start a clean VAD and seed it with the pre-roll ring, so an
+// utterance that began at (or just before) the PTT press is transcribed in full instead
+// of arriving with its first word missing.
+void CDaemon::openCaptureWindow() {
+    resetVad();
+    std::vector<float> pre;
+    int64_t            preStartMs = 0;
+    const size_t       n          = m_preRoll.drain(pre, preStartMs);
+    if (n == 0)
+        return;
+    std::vector<SSpeechSegment> segs;
+    m_vad->push(pre.data(), pre.size(), preStartMs, segs);
+    // The ring is shorter than an utterance, but a segment CAN close inside it if the
+    // user spoke and stopped before the key even registered — keep it rather than drop it.
+    for (auto& s : segs)
+        handleSegment(s);
+    Log::log(Log::DEBUG, "capture window opened with {}ms of pre-roll",
+             (n * 1000) / static_cast<size_t>(m_cfg.audio.sampleRate));
+}
+
+void CDaemon::applyMicPolicy() {
+    const bool        active = m_machine.micShouldBeOpen();
+    const bool        hold   = captureShouldBeHeld();
+    const std::string source = chooseSource();
+
+    // ---- 1. stream lifetime ----
+    if (active || hold) {
+        const bool failed = m_audio.failed();
+        const bool need   = !m_audio.running() || m_audio.source() != source || failed;
+        // Re-check the backoff here as well as inside startCapture, so a stream that is
+        // down for good doesn't log a reconnect line at the 4 Hz tick rate.
+        if (need && Clock::monotonicMs() >= m_captureRetryAtMs) {
+            if (failed)
+                Log::log(Log::WARN, "capture stream unusable (state {}); reconnecting", m_audio.stateName());
+            startCapture(source);
+        }
+    } else if (m_audio.running()) {
         m_audio.stop();
-        updateListeningHud(); // capture closed → drop any listening panel we own.
+        m_preRoll.clear();
+        m_captureBackoffMs = 0;
+        m_captureRetryAtMs = 0;
     }
+
+    // ---- 2. the gate ----
+    if (active && !m_captureActive) {
+        m_captureActive = true;
+        openCaptureWindow();
+        // NOTE: an open gate does NOT mean "listening" — in ARMED_WAKEWORD it is open at
+        // DON but nothing is being transcribed. The listening panel is driven by
+        // updateListeningHud() from the actual utterance-capture signal, so the HUD stays
+        // honest (no "listening…" merely because the wake word is armed).
+    } else if (!active && m_captureActive) {
+        m_captureActive = false;
+        m_preRoll.clear(); // start the next window's pre-roll from post-window audio only
+        updateListeningHud(); // gate closed → drop any listening panel we own.
+    }
+}
+
+void CDaemon::noteWindowResult(const char* outcome) {
+    m_windowProduced = true;
+    m_hudResultShown = true;
+    m_hudListening   = false;
+    m_lastOutcome    = outcome;
 }
 
 void CDaemon::updateListeningHud() {
@@ -243,12 +357,22 @@ void CDaemon::updateListeningHud() {
     const bool pttOpen = m_machine.state() == EState::Listening &&
                          m_machine.currentActivation() == EActivation::PushToTalk;
     const bool capturing = (m_vad && m_vad->inSpeech()) || pttOpen;
-    if (capturing && !m_hudListening) {
+
+    if (!capturing) {
+        if (m_hudListening) {
+            Feedback::onListeningStop(m_cfg);
+            m_hudListening = false;
+        }
+        m_hudResultShown = false; // the next capture may raise a fresh listening panel
+        return;
+    }
+    // Capturing — but do NOT raise "listening…" back over a result panel this window has
+    // already produced. A PTT window stays "open" until the key is released, and blindly
+    // re-raising here is what buried the transcript/action panel under "listening…" for a
+    // user who paused before letting go.
+    if (!m_hudListening && !m_hudResultShown) {
         Feedback::onListeningStart(m_cfg);
         m_hudListening = true;
-    } else if (!capturing && m_hudListening) {
-        Feedback::onListeningStop(m_cfg);
-        m_hudListening = false;
     }
 }
 
@@ -274,7 +398,27 @@ void CDaemon::tick() {
     updateListeningHud();
     Feedback::pollRuntime(); // drain the hypxrhud bus fd (runtime/ownership signals).
 
-    // Periodic capture telemetry (every ~30 s while the mic is open): the same fields
+    // Stall watchdog for the HELD stream: a WiVRn disconnect can leave the node in place
+    // while PCM simply stops arriving, which the PipeWire stream state never reports. Only
+    // acted on while the gate is SHUT — a reconnect there is invisible, whereas doing it
+    // mid-window would cut the user off mid-sentence.
+    if (m_audio.running()) {
+        const uint64_t frames = m_framesReceived.load(std::memory_order_relaxed);
+        if (frames != m_lastFrameCount) {
+            m_lastFrameCount    = frames;
+            m_lastFrameChangeMs = now;
+            // PCM is flowing: this connection is healthy, so forget the reconnect backoff.
+            m_captureBackoffMs = 0;
+            m_captureRetryAtMs = 0;
+        } else if (!m_captureActive && m_lastFrameChangeMs != 0 &&
+                   now - m_lastFrameChangeMs >= 10000 && now >= m_captureRetryAtMs) {
+            Log::log(Log::WARN, "held capture stalled ({}s without frames); reconnecting",
+                     (now - m_lastFrameChangeMs) / 1000);
+            startCapture(chooseSource());
+        }
+    }
+
+    // Periodic capture telemetry (every ~30 s while the stream is up): the same fields
     // `status` reports, logged so a silent source or dead path is obvious in the journal.
     if (m_audio.running() && now - m_lastAudioLogMs >= 30000) {
         m_lastAudioLogMs = now;
@@ -305,10 +449,20 @@ void CDaemon::closePttWindow() {
     m_machine.onTranscribeDone();
     m_pttDeadlineMs = 0;
     updateListeningHud();
+    // Never end an explicitly requested window in silence. If VAD found nothing at all,
+    // say "didn't hear anything" rather than just dropping the "listening…" panel and
+    // leaving the user unable to tell a dead mic from a grammar miss (WP-V6).
+    if (!m_windowProduced) {
+        m_lastText    = "";
+        m_lastOutcome = "no-speech";
+        Feedback::emitRejected("", m_cfg);
+    }
+    m_windowProduced = false;
 }
 
 std::string CDaemon::handleControl(const std::string& cmd) {
     if (cmd == "ptt start" || cmd == "ptt") {
+        m_windowProduced = false; // fresh window: nothing shown yet (see closePttWindow)
         m_machine.onPttStart();
         // Arm the auto-close deadline only if we actually opened a PTT window. Set from
         // "now" on every open (the mic may already have been open in ARMED_WAKEWORD, in
@@ -347,7 +501,16 @@ std::string CDaemon::statusJson() const {
     std::string o = "{";
     o += "\"state\":\"" + std::string(stateName(m_machine.state())) + "\"";
     o += ",\"mode\":\"" + modeStr + "\"";
+    // micOpen = the PCM stream is CONNECTED. Since WP-V6 that no longer implies anything
+    // is being listened to: captureActive is the gate (frames reaching VAD/ASR), and
+    // captureHeld means the stream is deliberately parked open with the gate shut so the
+    // next window starts instantly. captureState is the raw PipeWire stream state.
     o += ",\"micOpen\":" + std::string(m_audio.running() ? "true" : "false");
+    o += ",\"captureActive\":" + std::string(m_captureActive ? "true" : "false");
+    o += ",\"captureHeld\":" + std::string(m_audio.running() && !m_captureActive ? "true" : "false");
+    o += ",\"captureState\":\"" + std::string(m_audio.stateName()) + "\"";
+    o += ",\"preRollMs\":" + std::to_string(m_cfg.capture.preRollMs);
+    o += ",\"preRollBufferedMs\":" + std::to_string(m_preRoll.bufferedMs());
     // Live audio observability: input level (rolling ~1 s), VAD state, and the
     // frames-received counter — enough to tell a silent source from a dead path.
     {
@@ -373,6 +536,9 @@ std::string CDaemon::statusJson() const {
     o += ",\"lastText\":\"";
     for (char c : m_lastText) { if (c == '"' || c == '\\') o += '\\'; o += c; }
     o += "\"";
+    // How the last window ENDED — "ok" | "unparsed" | "no-speech" | "asr-unavailable".
+    // Without it an empty lastText is ambiguous between "never ran" and "heard nothing".
+    o += ",\"lastOutcome\":\"" + m_lastOutcome + "\"";
     o += ",\"intentEnabled\":" + std::string(m_cfg.intent.enabled ? "true" : "false");
     o += ",\"intentBackend\":\"" + m_cfg.intent.backend + "\"";
     o += ",\"executorDryRun\":" + std::string(m_cfg.executor.dryRun ? "true" : "false");
@@ -401,6 +567,7 @@ std::string CDaemon::doReload() {
 
     m_machine.configure(m_cfg.activation.mode, m_cfg.activation.fallback);
     resetVad();
+    m_preRoll.configure(m_cfg.audio.sampleRate, m_cfg.capture.preRollMs);
 
     std::string note = "ok: reloaded";
     if (m_cfg.asr.model != oldModel || m_cfg.asr.language != oldLang || m_cfg.asr.translate != oldTranslate) {

@@ -23,6 +23,27 @@ source = ""
 headset_source = "wivrn.source"
 sample_rate = 16000
 
+[capture]
+# Capture-stream lifetime. Opening the PipeWire stream at each PTT press costs a stream
+# connect PLUS a `wivrn.source` resume from SUSPENDED — and resuming that source makes the
+# WiVRn server ask the headset client to start its microphone over the network. That is
+# ~0.5-1 s during which you are already talking, so the leading verb of every command used
+# to be missing ("terminal to the left monitor" for "move terminal to the left monitor")
+# and short utterances vanished entirely.
+#
+# hold = true keeps the stream CONNECTED between windows whenever the headset is present
+# (a desk source opens locally and fast, so it is left alone). While no window is open the
+# frames go nowhere but the pre-roll ring below: never to the VAD, ASR, or wake-word tier,
+# never to disk. On the next PTT press the ring is spliced in front of the live audio, so
+# speech that started before the press is still transcribed.
+#
+# TRADE-OFF: a held stream keeps `wivrn.source` running, which keeps the headset mic
+# streaming — a small continuous battery cost on the headset. Wake-word mode already
+# behaved this way. Set hold = false for per-window streams (and accept losing the first
+# word again). `hypxrvoicectl status` reports captureHeld / captureActive / preRollBufferedMs.
+hold = true
+preroll_ms = 1000       # rolling pre-roll spliced in front of a new window; 0 disables it
+
 [vad]
 # Energy-gated voice activity detection. Raise energy_threshold if background noise
 # false-triggers; lower it if quiet speech is missed.

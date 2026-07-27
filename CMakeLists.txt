@@ -63,6 +63,7 @@ add_library(hypxrvoice_core STATIC
     src/Transcript.cpp
     src/ActivationMachine.cpp
     src/Vad.cpp
+    src/PreRoll.cpp
     src/WakeWord.cpp
     src/Asr.cpp
     src/Wav.cpp
@@ -124,6 +125,7 @@ add_executable(hypxrvoice_tests
     tests/test_activation.cpp
     tests/test_config.cpp
     tests/test_vad.cpp
+    tests/test_preroll.cpp
     tests/test_wakeword.cpp
     tests/test_transcript.cpp
     tests/test_compositor.cpp

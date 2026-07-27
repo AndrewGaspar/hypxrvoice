@@ -23,7 +23,9 @@ the code leaves clean seams for them.
    │   PTT via hypxrvoicectl          ─▶  away/donned  → ARMED_WAKEWORD         │
    │   (compositor absent → wake-armed fallback)                               │
    └───────────────┬───────────────────────────────────────────────────────────┘
-                   │ mic PCM opened ONLY when armed or PTT-held (privacy invariant)
+                   │ PCM reaches the VAD/ASR ONLY when armed or PTT-held (the gate).
+                   │ The stream itself is HELD open in a headset session; gated frames
+                   │ go nowhere but a ~1 s pre-roll ring, spliced onto the next window.
                    ▼
    PipeWire ─▶ [ energy VAD ] ─▶ speech segment (+ CLOCK_MONOTONIC onset)   [IMPLEMENTED]
    wivrn.source /               │
@@ -128,6 +130,16 @@ cfg)`, which drives three channels:
   donned), or `hud = false`. hypxrvoice watches `RuntimeStateChanged` + `NameOwnerChanged`
   to know, so it never polls; a single logged note marks the degrade.
 
+**A rejected window is never silent.** A transcript the parser can't use, or a window with
+no speech in it at all, used to *hide* the HUD — which looks exactly like a dead
+microphone, and gave no clue whether audio, ASR, or the grammar was at fault. Both now
+raise a brief **rejection panel** (~2.5 s): the transcript echoed back verbatim above
+"didn't catch a command", or "didn't hear anything" when nothing was heard. The outcome
+also lands in `hypxrvoicectl status` as `lastOutcome`
+(`ok` / `unparsed` / `no-speech` / `asr-unavailable`) alongside `lastText`. A wake-word
+window that simply wasn't addressed to you stays quiet — that is what the wake phrase is
+for; only an *explicitly requested* (PTT) window always answers.
+
 The view model + phrasing + colour roles stay a **pure library** (`HudModel`) and the
 `SHudView → props` mapping (`HudClient`) is pure and unit-tested with no bus. The HUD's
 actual pixels are hypxrhud's concern — review them there with `hypxrhud --preview`.
@@ -138,11 +150,41 @@ on-headset checklist.
 ### Activation state machine
 
 `GATED_KEYBOARD → ARMED_WAKEWORD → LISTENING → TRANSCRIBING`, driven by the compositor
-signal + PTT. The **mic PCM stream is opened only in armed/listening states** — a
-process-level privacy invariant (observable in `pw-top`/`wpctl`), not a promise. Mirrors
-the compositor's `hand_input=auto`: at the keyboard it is PTT-only; away / headset donned
-it arms the wake word. If the compositor or its `openxr` status section is absent, it
-degrades to wake-armed (configurable).
+signal + PTT. Mirrors the compositor's `hand_input=auto`: at the keyboard it is PTT-only;
+away / headset donned it arms the wake word. If the compositor or its `openxr` status
+section is absent, it degrades to wake-armed (configurable).
+
+### Persistent capture + the pre-roll ring
+
+Opening the PipeWire stream at the PTT press cost **~0.5–1 s** — the stream connect plus a
+`wivrn.source` resume from SUSPENDED, which makes the WiVRn server ask the headset client
+to start its mic over the network. You are already speaking during that hole, so every
+transcript arrived missing its leading verb and short commands never arrived at all.
+
+The stream is therefore **held connected** across windows whenever a headset is present
+(`capture.hold`, default on). Two separate things now:
+
+| | meaning | `status` field |
+|---|---|---|
+| stream connected | PCM is being pulled from the source | `micOpen`, `captureState` |
+| **gate open** | frames reach the VAD / ASR / wake-word tiers | `captureActive` |
+| held | connected with the gate shut | `captureHeld` |
+
+**The privacy invariant is the gate, not the stream.** While the gate is shut the frames
+are written to exactly one place: a rolling `capture.preroll_ms` (default 1 s ≈ 32 kB)
+pre-roll ring in RAM. They are never analysed, never transcribed, never persisted, and
+never leave the process. When a window opens the ring is spliced onto the front of it, so
+speech that began *before* the press is transcribed in full. Out of the headset the stream
+is still opened per window (a desk source resumes locally and fast, so holding it buys
+nothing). `capture.hold = false` restores per-window streams everywhere.
+
+**Trade-off:** a held stream keeps `wivrn.source` running, which keeps the headset mic
+streaming — a small continuous battery cost on the headset. Wake-word mode already did
+this; PTT mode now does too while donned.
+
+Stream health is supervised: a source that errors, vanishes (WiVRn disconnect), or goes
+silent for 10 s while gated is reconnected with exponential backoff (1 s → 30 s cap)
+rather than retried at the tick rate. A reconnect never interrupts an open window.
 
 ## Build
 
@@ -242,7 +284,9 @@ hypxrvoiced --intent-text "move the coding monitor closer"
 
 `~/.config/hypxrvoice/config.toml` (see `examples/config.toml` for the annotated full
 set). Sections: `[activation]` (mode auto/ptt/wake, fallback), `[audio]` (source,
-sample rate), `[vad]` (thresholds), `[wake]` (phrase, backend), `[asr]` (model path,
+sample rate), `[capture]` (`hold`, `preroll_ms` — see
+[Persistent capture](#persistent-capture--the-pre-roll-ring)), `[vad]` (thresholds),
+`[wake]` (phrase, backend), `[asr]` (model path,
 language, threads), `[intent]` (backend rule/llama, model, deixis window/lead),
 `[executor]` (**dry_run default true**, allow_launch, capability flags), `[apps]`
 (launch allowlist), `[feedback]`, `[compositor]` (poll). Hot-reload with

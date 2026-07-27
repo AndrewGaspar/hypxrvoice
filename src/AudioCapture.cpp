@@ -26,6 +26,10 @@ struct CAudioCapture::Impl {
     CAudioCapture::Callback  cb;
     int                      sampleRate = 16000;
     uint32_t                 channels   = 1;
+
+    // Stream health, written on the PipeWire thread and read by the daemon tick.
+    std::atomic<int>  state{PW_STREAM_STATE_UNCONNECTED};
+    std::atomic<bool> everConnected{false};
 };
 
 static void onProcess(void* userdata) {
@@ -64,13 +68,43 @@ static void onProcess(void* userdata) {
     pw_stream_queue_buffer(impl->stream, b);
 }
 
+// Track the stream state so the daemon can tell "held open and streaming" from "the
+// source went away" (WiVRn disconnect) and reconnect with backoff instead of assuming a
+// once-started stream stays alive forever.
+static void onStateChanged(void* userdata, pw_stream_state /*old*/, pw_stream_state state, const char* error) {
+    auto* impl = static_cast<CAudioCapture::Impl*>(userdata);
+    impl->state.store(static_cast<int>(state), std::memory_order_relaxed);
+    if (state == PW_STREAM_STATE_STREAMING || state == PW_STREAM_STATE_PAUSED)
+        impl->everConnected.store(true, std::memory_order_relaxed);
+    if (state == PW_STREAM_STATE_ERROR)
+        Log::log(Log::WARN, "capture stream error: {}", error ? error : "unknown");
+}
+
 static const pw_stream_events s_streamEvents = {
-    .version = PW_VERSION_STREAM_EVENTS,
-    .process = onProcess,
+    .version       = PW_VERSION_STREAM_EVENTS,
+    .state_changed = onStateChanged,
+    .process       = onProcess,
 };
 
 CAudioCapture::~CAudioCapture() {
     stop();
+}
+
+const char* CAudioCapture::stateName() const {
+    if (!m_impl)
+        return "closed";
+    return pw_stream_state_as_string(static_cast<pw_stream_state>(m_impl->state.load(std::memory_order_relaxed)));
+}
+
+bool CAudioCapture::failed() const {
+    if (!m_impl || !m_running)
+        return false;
+    const auto st = static_cast<pw_stream_state>(m_impl->state.load(std::memory_order_relaxed));
+    if (st == PW_STREAM_STATE_ERROR)
+        return true;
+    // AUTOCONNECT + a target that vanished: the stream drops back to UNCONNECTED and
+    // will never reconnect itself.
+    return st == PW_STREAM_STATE_UNCONNECTED && m_impl->everConnected.load(std::memory_order_relaxed);
 }
 
 bool CAudioCapture::start(const std::string& source, int sampleRate, Callback cb) {

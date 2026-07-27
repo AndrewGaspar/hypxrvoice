@@ -78,4 +78,19 @@ TEST_CASE("config: empty document yields defaults") {
     CHECK(c.activation.mode == EActivationMode::Auto);
     CHECK(c.wake.phrase == "hey hypr");
     CHECK(c.audio.sampleRate == 16000);
+    // WP-V6: the persistent capture stream + pre-roll splice are ON by default — the
+    // per-window stream teardown cost the user the first word of every utterance.
+    CHECK(c.capture.hold);
+    CHECK(c.capture.preRollMs == 1000);
+}
+
+TEST_CASE("config: the capture knobs parse") {
+    const char* doc = "[capture]\nhold = false\npreroll_ms = 450\n";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    REQUIRE(parseConfig(doc, c, errs, warns));
+    CHECK(errs.empty());
+    CHECK(warns.empty());
+    CHECK_FALSE(c.capture.hold);
+    CHECK(c.capture.preRollMs == 450);
 }

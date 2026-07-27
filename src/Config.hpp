@@ -33,6 +33,18 @@ struct SConfig {
         int         sampleRate    = 16000;          // whisper wants 16 kHz mono
     } audio;
 
+    // Capture-stream lifetime (WP-V6). Opening the stream per PTT window cost ~0.5–1 s
+    // (PipeWire connect + `wivrn.source` resume from SUSPENDED, which asks the headset
+    // client to start its mic over the network) and swallowed the first word of every
+    // utterance. In a headset session the stream is therefore HELD open, with gated
+    // frames going nowhere but a rolling pre-roll ring that is spliced onto the front of
+    // the next window. See PreRoll.hpp for the privacy semantics and README for the
+    // battery trade-off (the headset mic keeps streaming while held).
+    struct {
+        bool hold      = true; // keep the stream connected across windows (headset only)
+        int  preRollMs = 1000; // rolling pre-roll spliced in front of a new window; 0 = off
+    } capture;
+
     struct {
         float energyThreshold = 0.012f; // RMS floor: a frame below this is always silence
         int   startMs         = 150;    // sustained voiced to declare onset

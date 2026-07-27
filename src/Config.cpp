@@ -165,6 +165,10 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setStr(out.audio.headsetSource, val);
         } else if (k == "audio.sample_rate") {
             setInt(out.audio.sampleRate, val);
+        } else if (k == "capture.hold") {
+            setBool(out.capture.hold, val);
+        } else if (k == "capture.preroll_ms") {
+            setInt(out.capture.preRollMs, val);
         } else if (k == "vad.energy_threshold") {
             setFloat(out.vad.energyThreshold, val);
         } else if (k == "vad.start_ms") {

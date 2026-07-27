@@ -7,6 +7,7 @@
 #include "Config.hpp"
 #include "ControlSocket.hpp"
 #include "LlamaIntent.hpp"
+#include "PreRoll.hpp"
 #include "Vad.hpp"
 
 #include <atomic>
@@ -40,9 +41,22 @@ class CDaemon {
     void handleSegment(const SSpeechSegment& seg);
 
     // ---- mic gating ----
-    void applyMicPolicy();      // open/close capture to match the state machine
+    //
+    // Two independent decisions since WP-V6 (see PreRoll.hpp for why):
+    //   captureShouldBeHeld() — is the PipeWire STREAM connected? Held across windows in
+    //                           a headset session, so a PTT press never pays the ~1 s
+    //                           connect + `wivrn.source` resume that ate the first word.
+    //   captureIsActive()     — do the frames reach the VAD/ASR/wake tiers? Only inside a
+    //                           real window. While it is false the frames go nowhere but
+    //                           the pre-roll ring.
+    void applyMicPolicy();      // reconcile both against the state machine + environment
+    bool captureShouldBeHeld() const;
+    bool captureIsActive() const { return m_captureActive; }
+    void startCapture(const std::string& source); // (re)connect, with failure backoff
+    void openCaptureWindow();   // gate opens: fresh VAD seeded with the pre-roll splice
     std::string chooseSource() const;
     void updateListeningHud();  // show "listening…" only while actually capturing
+    void noteWindowResult(const char* outcome); // this window has shown the user something
 
     void closePttWindow();      // flush + settle + disarm the PTT deadline (single path)
 
@@ -75,12 +89,25 @@ class CDaemon {
     int m_timerFd = -1;
     int m_epollFd = -1;
 
+    // Frames arriving while the gate is shut land here and nowhere else; spliced onto
+    // the front of the next window so speech that started before the PTT press survives.
+    CPreRollRing m_preRoll;
+
     SEnvSignal m_env{};
     int64_t    m_lastPollMs   = 0;
     int64_t    m_pttDeadlineMs = 0; // absolute deadline for the OPEN PTT window (0 = none)
     EState     m_lastState    = EState::GatedKeyboard;
     bool       m_hudListening = false; // we currently own the HUD with a listening panel
+    bool       m_hudResultShown = false; // a result panel replaced "listening…" this window
+    bool       m_windowProduced = false; // the open PTT window told the user something
     int64_t    m_lastAudioLogMs = 0;   // throttle for the periodic capture-stats DEBUG log
+
+    // ---- persistent capture bookkeeping ----
+    bool    m_captureActive     = false; // frames are reaching the VAD/ASR/wake tiers
+    int64_t m_captureRetryAtMs  = 0;     // no (re)connect attempt before this instant
+    int     m_captureBackoffMs  = 0;     // current reconnect backoff (doubles to a cap)
+    uint64_t m_lastFrameCount   = 0;     // frames seen at m_lastFrameChangeMs
+    int64_t m_lastFrameChangeMs = 0;     // last time the frame counter moved (stall watchdog)
 
     // ---- live audio observability (PW-thread writes, main-thread reads) ----
     std::atomic<uint64_t> m_framesReceived{0};   // total frames delivered by capture
@@ -89,6 +116,10 @@ class CDaemon {
 
     // last transcript summary for `status`
     std::string m_lastText;
+    // Outcome of the last capture window: "idle" | "ok" | "unparsed" | "no-speech" |
+    // "asr-unavailable". Makes a rejected window visible to `hypxrvoicectl status`
+    // instead of leaving a stale lastText behind.
+    std::string m_lastOutcome = "idle";
     int64_t     m_lastOnsetMs = 0;
     std::string m_lastRawStatus;
     std::string m_lastAction; // last resolved command (verb + target), for `status`
