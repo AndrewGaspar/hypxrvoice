@@ -30,6 +30,15 @@ namespace {
         return hay.find(needle) != std::string::npos;
     }
 
+    // Whole-token match. Needed where a substring test would swallow an inflection that
+    // means something else — see the focus branch and "the FOCUSED monitor".
+    bool hasToken(const std::vector<std::string>& toks, const char* w) {
+        for (auto& t : toks)
+            if (t == w)
+                return true;
+        return false;
+    }
+
     // Command keywords that must not leak into a semantic target phrase.
     bool isCommandWord(const std::string& t) {
         static const char* kw[] = {
@@ -135,6 +144,33 @@ namespace {
     // "here"/"there" — a PLACE deixis. Used as a destination it names the monitor the
     // user was looking at when the word was spoken.
     bool isPlaceDeicticWord(const std::string& t) { return t == "here" || t == "there"; }
+
+    // Did the user SPEAK the compositor's own selection — "the active monitor", "the
+    // focused screen", "the current one"? Those words, and ONLY those words, mean
+    // ETargetSource::Active: `active` resolves through the compositor's resolveSelected()
+    // order (explicit `openxr select` > last pointer-ray hover > Hyprland-focused output
+    // that also has an XR layer — Hyprland src/openxr/OpenXRManager.cpp:3538). Every
+    // other route to `active` for a monitor verb is a silent guess, which round 8
+    // removed. A phrase carrying any content word is not this phrase: "the active coding
+    // monitor" names XR-code, not the selection.
+    bool namesActiveTarget(const std::string& phrase) {
+        static const char* kFiller[]   = {"monitor", "screen", "display", "one", "thing"};
+        static const char* kSelected[] = {"active", "focused", "focus", "current",
+                                          "currently", "selected"};
+        bool sawSelected = false;
+        for (auto& t : words(phrase)) {
+            bool ok = false;
+            for (auto* s : kSelected)
+                if (t == s) { sawSelected = true; ok = true; break; }
+            if (ok)
+                continue;
+            for (auto* f : kFiller)
+                if (t == f) { ok = true; break; }
+            if (!ok)
+                return false;
+        }
+        return sawSelected;
+    }
 
     // The prepositions that can introduce a move's destination. People do not consistently
     // say "to": the live round produced "move workspace forward IN this monitor", which the
@@ -560,6 +596,23 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
     // ---- verb detection (order matters: specific before generic) ----
     auto setVerb = [&](EVerb v, const char* n) { r.verb = v; r.note = n; };
 
+    // MoveDist only. "come here" / "bring it closer" is MOTION — the deictic names no
+    // destination point and no subject, so it must not become a place-deixis. But a
+    // MONITOR-deixis is the subject: "move THIS monitor closer" designates its target by
+    // gaze exactly like "pick this monitor up" does.
+    //
+    // Round 8 live bug. This used to be a flat `r.deictic = false`, which threw the
+    // "this" away wholesale. "Move this monitor closer." then had an empty target phrase
+    // (every word in it is a command word), no gaze block at all, and fell through
+    // finalize's last resort to `target=active` — so the compositor pulled whatever
+    // resolveSelected() happened to point at while the user was looking somewhere else.
+    auto dropPlaceDeixis = [&]() {
+        if (r.deicticIsPlace) {
+            r.deictic       = false;
+            r.deicticWordMs = 0;
+        }
+    };
+
     // Window management (round 2). These sit ahead of the XR verbs because their
     // triggers are multi-word and specific, and because a phrase like "focus the center
     // monitor" would otherwise be swallowed by the generic "center" keyword below.
@@ -630,7 +683,12 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
         setVerb(EVerb::Fullscreen, "fullscreen keyword");
         if (fsAt < 0)
             r.sub = "maximize"; // "maximize" is the other Hyprland fullscreen mode
-    } else if (contains(text, "focus") || contains(text, "switch to")) {
+    } else if (hasToken(toks, "focus") || contains(text, "switch to")) {
+        // WHOLE TOKEN, not a substring. "Move the FOCUSED monitor closer" names its
+        // target with an adjective — the compositor's own selection — and the substring
+        // test read it as the focus VERB, turning a distance move into a Clarify. The
+        // imperative is always the bare stem ("focus the browser"); nobody commands a
+        // window by saying "focused".
         setVerb(EVerb::Focus, "focus keyword");
     } else if (contains(text, "hand")) {
         setVerb(EVerb::HandInput, "hand-input keyword");
@@ -671,12 +729,12 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
                contains(text, "bring it") || contains(text, "come here")) {
         setVerb(EVerb::MoveDist, "closer keyword");
         r.deltaM = -m_cfg.distanceStep;
-        r.deictic = false; // "come here"/"closer" is motion, not a place-deixis
+        dropPlaceDeixis();
     } else if (contains(text, "further") || contains(text, "farther") ||
                contains(text, "push it") || contains(text, "away") || contains(text, "back")) {
         setVerb(EVerb::MoveDist, "further keyword");
         r.deltaM = +m_cfg.distanceStep;
-        r.deictic = false;
+        dropPlaceDeixis();
     } else if (contains(text, "anchor") || contains(text, "world lock") ||
                contains(text, "world-lock") || contains(text, "lock it")) {
         setVerb(EVerb::Anchor, "anchor keyword");
@@ -756,14 +814,27 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
     }
 
     // ---- target resolution ----
+    // The user SPOKE the selection ("move the active monitor closer"). That is the one
+    // and only licence to emit `active` for a monitor verb, and it also settles the
+    // subject, so no deixis is queried and no fallback runs.
+    const bool spokeActive = namesActiveTarget(raw.targetPhrase);
+
     // 1. Semantic name/app match from the spoken phrase.
     SMonitorMatch sem;
-    if (!raw.targetPhrase.empty())
+    if (!raw.targetPhrase.empty() && !spokeActive)
         sem = ctx.resolveMonitor(raw.targetPhrase);
 
-    // 2. Deixis via the gaze ring (only when no confident name was spoken).
+    // 2. Deixis via the gaze ring, at the timestamp of the DEICTIC WORD.
+    //
+    // A MONITOR-deixis ("this"/"that") competes with a spoken name for the SUBJECT slot,
+    // so a confident name wins it. A PLACE-deixis ("here"/"there") designates a POINT or
+    // a DESTINATION and competes with nothing — suppressing it because the subject was
+    // named is how "put the coding monitor HERE" silently lost its "here" and degraded to
+    // a freeze-in-place.
     SGazeResolution gz;
-    const bool wantDeixis = raw.deictic && (!sem.matched || sem.confidence < 0.6);
+    const bool deixisIsSubject = raw.deictic && !raw.deicticIsPlace;
+    const bool wantDeixis =
+        raw.deictic && !spokeActive && (!deixisIsSubject || !sem.matched || sem.confidence < 0.6);
     if (wantDeixis && gazeQuery)
         gz = resolveDeixis(raw.deicticWordMs, cfg.gaze, gazeQuery, &ctx);
 
@@ -953,22 +1024,42 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
         return a;
     }
 
-    // Place is special: "here" designates a POSE for the currently-carried monitor,
-    // NOT a new monitor pick. Keep the target as `active`, attach the gaze pose.
+    // Place is special: "here" designates a POSE, not a monitor pick. The SUBJECT of a
+    // place is anaphoric ("place IT here" — the thing you are already carrying), which is
+    // the one case where deferring to the compositor's selection is right rather than a
+    // guess: `resolveSelected()` is what the grab verbs just set. A subject the user
+    // actually NAMED still wins ("put the coding monitor here"), which the old code
+    // ignored outright.
     if (raw.verb == EVerb::Place) {
-        a.target       = "active";
-        a.targetSource = ETargetSource::Active;
+        if (sem.matched && sem.candidates.size() <= 1) {
+            a.target       = sem.name;
+            a.targetSource = ETargetSource::Semantic;
+            a.confidence   = std::min(a.confidence, sem.confidence);
+        } else {
+            a.target       = "active";
+            a.targetSource = ETargetSource::Active;
+        }
         if (gz.valid) {
-            a.gaze         = gz;
-            a.targetSource = ETargetSource::Deixis;
+            a.gaze = gz;
+            // Only an un-named subject takes its identity from the gaze; a named one keeps
+            // Semantic so the HUD does not claim the name came from a look.
+            if (a.targetSource == ETargetSource::Active)
+                a.targetSource = ETargetSource::Deixis;
             // Confidence reflects how settled the gaze pick was.
-            a.confidence = gz.stable ? 0.9 : 0.6;
+            a.confidence = std::min(a.confidence, gz.stable ? 0.9 : 0.6);
         }
         return a;
     }
 
-    // For all other monitor verbs: prefer a live semantic match, else deixis, else
-    // the hovered monitor, else `active`.
+    // For all other monitor verbs (Pick, MoveDist, Center, Dock, Undock, Follow, Anchor):
+    // spoken-active, then a live semantic match, then deixis — and then, only when the
+    // user named NO subject at all, the fallbacks. See docs/DEIXIS-SEMANTICS.md.
+    if (spokeActive) {
+        a.target       = "active";
+        a.targetSource = ETargetSource::Active;
+        a.note += " (spoken active/focused)";
+        return a;
+    }
     if (sem.matched && sem.candidates.size() > 1) {
         // Ambiguous: pick the best but flag it low-confidence with the alternatives.
         a.target         = sem.name;
@@ -993,14 +1084,53 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
         a.confidence   = gz.stable ? std::min(a.confidence, 0.9) : 0.6;
         return a;
     }
-    if (raw.deictic && gz.valid) {
-        // Deictic resolved but landed on passthrough (no monitor) — attach the pose
-        // and fall back to the hovered/active target so the verb still has a subject.
-        a.gaze = gz;
+    if (raw.deictic && gz.valid)
+        a.gaze = gz; // keep the pose even when the deixis landed on passthrough
+
+    // A spoken MONITOR-deixis that resolved to no live monitor is a CLARIFY, never a
+    // fallback. This is the round-8 contract, and the reason for it is the shape of the
+    // failure: the user said "this", which means they were looking somewhere specific,
+    // and every fallback we have (hover, selection, focus) resolves to somewhere they
+    // were NOT looking. Acting on the wrong monitor in a headset costs more than asking.
+    //
+    // A PLACE-deixis is exempt: "place it here" / "dock it here" designate a POSE for a
+    // subject that is anaphoric, not a monitor to go find.
+    if (deixisIsSubject) {
+        a.verb            = EVerb::Clarify;
+        a.clarifyQuestion = "look at the monitor you mean";
+        a.confidence      = 0.3;
+        return a;
     }
+
+    // Nothing was named and nothing was pointed at. "Move closer" is the live case:
+    // a bare direction with no subject at all.
+    //
+    // GAZE-FIRST, by decision (round 8): the monitor you are LOOKING at is what a bare
+    // "move closer" means far more often than whatever `openxr select` last stuck to,
+    // and the compositor's own resolveSelected() is a *sticky* selection that can be
+    // minutes stale. There is no deictic word to time the query from, so we use the
+    // utterance ONSET — the instant the user decided to speak, which is the closest thing
+    // to a word timestamp a subject-less phrase has. Only MoveDist takes this path today;
+    // the other bare verbs keep the historical hover/selection fallback because none of
+    // them has misfired live (see docs/DEIXIS-SEMANTICS.md §"bare verbs").
+    if (raw.verb == EVerb::MoveDist && gazeQuery && t.onsetMs > 0) {
+        SGazeResolution bare = resolveDeixis(t.onsetMs, cfg.gaze, gazeQuery, &ctx);
+        if (bare.valid && !bare.name.empty() && ctx.hasMonitor(bare.name)) {
+            a.target       = bare.name;
+            a.targetSource = ETargetSource::Deixis;
+            a.gaze         = bare;
+            a.confidence   = std::min(a.confidence, bare.stable ? 0.8 : 0.6);
+            a.note += " (no subject spoken — gazed monitor at utterance onset)";
+            return a;
+        }
+    }
+
     if (const SMonitorInfo* h = ctx.hoveredMonitor()) {
+        // The compositor's pointer-ray hover. This is NOT gaze deixis, and labelling it
+        // Deixis told the HUD a story that was not true; it is tier 2 of the compositor's
+        // own resolveSelected() order, so Active is what it actually is.
         a.target       = h->name;
-        a.targetSource = ETargetSource::Deixis;
+        a.targetSource = ETargetSource::Active;
         a.confidence   = std::min(a.confidence, 0.7);
         a.note += " (hovered-monitor fallback)";
         return a;

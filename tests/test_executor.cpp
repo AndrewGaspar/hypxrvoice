@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include "Executor.hpp"
+#include "Intent.hpp"
 
 #include <string>
 #include <vector>
@@ -610,4 +611,48 @@ TEST_CASE("executor: wait_monitor_ms=0 looks exactly once, and dry-run never pro
     CHECK(runPlan(planFor(a, fixtureCtx(), dry), dry, rec, pr, np) == 0);
     CHECK(probes == 0);
     CHECK(naps == 0);
+}
+
+// Round 8, end to end. "Move this monitor closer." went out live as a bare
+// `openxr distance -0.25` with no `select` — and `distance` takes no monitor argument at
+// all (Hyprland OpenXRManager::cmdDistance), so it acted on whatever resolveSelected()
+// pointed at: explicit `openxr select` > last pointer-ray hover > focused XR output.
+// The user was looking somewhere else entirely. The plan must now name the monitor.
+TEST_CASE("executor: a gaze-resolved 'move this monitor closer' selects before it pulls") {
+    CRuleIntent eng(SIntentConfig{});
+    STranscript t;
+    t.text    = "move this monitor closer";
+    t.onsetMs = 100000;
+    int64_t ms = 100000;
+    for (const char* w : {"move", "this", "monitor", "closer"}) {
+        SWord sw; sw.text = w; sw.startMs = ms; sw.endMs = ms + 150;
+        t.words.push_back(sw);
+        ms += 200;
+    }
+    t.endMs = ms;
+
+    GazeQueryFn q = [](int64_t at) {
+        char b[360];
+        std::snprintf(b, sizeof(b),
+                      R"json({"ok":true,"viewValid":true,"timestampMs":%lld,
+                      "head":{"pos":[0,1.4,0],"forward":[0,0,-1]},
+                      "gaze":{"monitorId":3,"name":"XR-code","selected":true,"dwellSec":0.4},
+                      "query":{"matchedTimestampMs":%lld,"ageMs":0}})json",
+                      (long long)at, (long long)at);
+        return std::string(b);
+    };
+
+    SDesktopContext ctx = fixtureCtx();
+    SAction         a   = eng.resolve(t, ctx, q);
+    REQUIRE(a.verb == EVerb::MoveDist);
+    CHECK(a.target == "XR-code");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+
+    SExecConfig cfg;
+    SExecPlan   p = planFor(a, ctx, cfg);
+    REQUIRE(p.ok);
+    CHECK(hasLine(p, "hyprctl openxr select XR-code"));
+    CHECK(hasLine(p, "hyprctl openxr distance -0.25"));
+    // Order matters: `distance` reads the selection, so the select must come first.
+    CHECK(lines(p).front() == "hyprctl openxr select XR-code");
 }

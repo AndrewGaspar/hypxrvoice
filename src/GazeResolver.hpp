@@ -32,12 +32,13 @@ struct SGazeSample {
     double      pos[3]    = {0, 0, 0};
     double      quat[4]   = {0, 0, 0, 1};
     double      forward[3]= {0, 0, 0};
-    // OPTIONAL gaze-ray/quad intersection. The compositor's `gaze` reply does NOT carry
-    // one today (its `gaze` object is monitorId/name/selected/dwellSec — see
-    // Hyprland src/openxr/XRIpc.cpp openxrGaze()), so this stays false and the resolver
-    // projects along `forward`. Parsed opportunistically from `gaze.hitPoint` (or
-    // `gaze.point`) so the day the compositor grows the field we use the real point
-    // with no daemon change.
+    // OPTIONAL gaze-ray/quad intersection, read from `gaze.hitPoint` (or `gaze.point`).
+    // Round 8: the compositor SHIPS this now — Hyprland 68a6eb20 ("report the gaze
+    // ray/quad hit point in `hyprctl openxr gaze`") closed GAP 4, and openxrGaze()
+    // emits `gaze.hitPoint` + `gaze.hitDistM` whenever the ray actually crosses a quad
+    // (Hyprland src/openxr/XRIpc.cpp). It stays false when the gaze misses every quad —
+    // which is the common case for "here" — and the resolver then projects along
+    // `forward`.
     bool        hasHit    = false;
     double      hit[3]    = {0, 0, 0};
     int64_t     timestampMs = 0;

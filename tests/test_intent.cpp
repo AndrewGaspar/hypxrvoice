@@ -962,3 +962,198 @@ TEST_CASE("intent: a workspace phrase with ANY destination remnant never switche
     CHECK(eng.detect(mk("move to workspace three")).verb == EVerb::Workspace);
     CHECK(eng.detect(mk("switch to workspace 4 on this monitor")).verb == EVerb::Workspace);
 }
+
+// ===========================================================================
+// Round 8 — deixis semantics. Two live misfires drove this block:
+//
+//   1. "Move this monitor closer."  → verb=move_dist target=active src=active with NO
+//      gaze block at all. The MoveDist branch cleared `deictic` wholesale ("closer is
+//      motion, not a place-deixis"), which also threw away the MONITOR-deixis "this";
+//      every word of the utterance is a command word, so the target phrase was empty
+//      too, and finalize's last resort emitted `active`. The compositor then pulled
+//      whatever resolveSelected() pointed at — never the monitor being looked at.
+//
+//   2. "Create a monitor here."     → placed where the user looked ~half a second
+//      BEFORE the word. Every live create logged ageMs ≈ 500 = deixis_lead_ms(200) +
+//      deixis_window_ms(300): the resolver picked the OLDEST sample in the stability
+//      window as its representative pose, because a deixis aimed at passthrough reports
+//      dwellSec = 0.000 in every sample and the "highest dwell" tie-break fell through
+//      to first-pushed. Fixed in GazeResolver (see test_gaze.cpp).
+//
+// The contract these pin down is in docs/DEIXIS-SEMANTICS.md.
+// ===========================================================================
+
+namespace {
+    // A ring that answers with DIFFERENT monitors either side of `splitMs`: `before` for
+    // samples at or before it, `after` for anything later. Every word-time assertion in
+    // this block works by putting the word on one side and "now" on the other.
+    GazeQueryFn gazeSplit(int64_t splitMs, int beforeId, const char* beforeName,
+                          int afterId, const char* afterName) {
+        return [=](int64_t at) {
+            const int   id = at <= splitMs ? beforeId : afterId;
+            const char* nm = at <= splitMs ? beforeName : afterName;
+            char        b[360];
+            std::snprintf(b, sizeof(b),
+                          R"json({"ok":true,"viewValid":true,"timestampMs":%lld,
+                          "head":{"pos":[0,1.4,0],"forward":[0,0,-1]},
+                          "gaze":{"monitorId":%d,"name":"%s","selected":%s,"dwellSec":0.3},
+                          "query":{"matchedTimestampMs":%lld,"ageMs":0}})json",
+                          (long long)at, id, id >= 0 ? nm : "", id >= 0 ? "true" : "false",
+                          (long long)at);
+            return std::string(b);
+        };
+    }
+}
+
+TEST_CASE("intent: 'move this monitor closer' targets the GAZED monitor, never active") {
+    CRuleIntent eng(icfg());
+
+    // The deixis survives the MoveDist branch.
+    SRawIntent r = eng.detect(mk("move this monitor closer"));
+    CHECK(r.verb == EVerb::MoveDist);
+    CHECK(r.deictic);
+    CHECK_FALSE(r.deicticIsPlace);
+    CHECK(r.deltaM < 0);
+
+    SAction a = eng.resolve(mk("move this monitor closer"), fixture(), gazeAt(4, "XR-web"));
+    CHECK(a.verb == EVerb::MoveDist);
+    CHECK(a.target == "XR-web");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+    CHECK(a.gaze.valid);
+    CHECK(a.deltaM == doctest::Approx(-0.25));
+
+    // …and the other direction, and the bare-subject phrasing, resolve the same way.
+    SAction b = eng.resolve(mk("push this monitor further away"), fixture(), gazeAt(3, "XR-code"));
+    CHECK(b.verb == EVerb::MoveDist);
+    CHECK(b.target == "XR-code");
+    CHECK(b.targetSource == ETargetSource::Deixis);
+    CHECK(b.deltaM > 0);
+
+    SAction c = eng.resolve(mk("move this closer"), fixture(), gazeAt(3, "XR-code"));
+    CHECK(c.verb == EVerb::MoveDist);
+    CHECK(c.target == "XR-code");
+    CHECK(c.targetSource == ETargetSource::Deixis);
+}
+
+TEST_CASE("intent: a move_dist deixis is resolved at the WORD, not at 'now'") {
+    CRuleIntent eng(icfg());
+    // mk() puts words 200 ms apart from t0: move@100000 this@100200 monitor@100400
+    // closer@100600. The deictic word is "this" at 100200; with the default lead (200)
+    // and window (300) every sample lands in [99700, 100000]. Whisper decode then takes
+    // 1.5-3 s, so a query issued "now" would be somewhere past 102000 — and by then the
+    // user is looking at XR-code, not the XR-web they meant.
+    GazeQueryFn q = gazeSplit(100100, 4, "XR-web", 3, "XR-code");
+    SAction a = eng.resolve(mk("move this monitor closer"), fixture(), q);
+    CHECK(a.target == "XR-web");             // where they looked when they said "this"
+    CHECK(a.targetSource == ETargetSource::Deixis);
+    CHECK(a.gaze.requestedMs == 100200);     // the word's DTW timestamp, verbatim
+
+    // The lead shift is deliberate and bounded: the pose comes from lead_ms before the
+    // word, NOT from lead_ms + window_ms before it (the round-8 rep-selection bug).
+    CHECK(a.gaze.ageMs == icfg().gaze.leadMs);
+}
+
+TEST_CASE("intent: a create-here place point is resolved at the WORD, not at 'now'") {
+    CRuleIntent eng(icfg());
+    // create@100000 a@100200 monitor@100400 here@100600 -> anchor 100400, window to 100100.
+    GazeQueryFn q = gazeSplit(100500, -1, "", -1, "");
+    SAction a = eng.resolve(mk("create a monitor here"), btopFixture(), q);
+    CHECK(a.verb == EVerb::CreateMonitor);
+    CHECK(a.gaze.valid);
+    CHECK(a.gaze.requestedMs == 100600);          // the word "here", not utterance end
+    CHECK(a.gaze.ageMs == icfg().gaze.leadMs);    // and not leadMs + windowMs
+    CHECK(a.gaze.placeDistM > 0.0);
+}
+
+TEST_CASE("intent: 'move this monitor closer' with nothing under gaze ASKS") {
+    CRuleIntent eng(icfg());
+    // The user said "this", so they were looking at something specific. Every fallback we
+    // have (pointer hover, sticky selection, keyboard focus) resolves to somewhere they
+    // were NOT looking — note the fixture's XR-web carries hovered:true, and the old code
+    // would have silently taken it.
+    SAction a = eng.resolve(mk("move this monitor closer"), fixture(), gazeAt(-1, ""));
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.clarifyQuestion == "look at the monitor you mean");
+    CHECK_FALSE(a.actionable());
+
+    // No ring at all is the same answer, not a guess.
+    SAction b = eng.resolve(mk("pick this monitor up"), fixture(), noGaze);
+    CHECK(b.verb == EVerb::Clarify);
+    CHECK_FALSE(b.actionable());
+}
+
+TEST_CASE("intent: a place-deixis in a move_dist phrase is motion, not a target") {
+    CRuleIntent eng(icfg());
+    // "come here" / "bring it here" name no monitor and no point — they are the direction
+    // word said twice. Dropping the place-deixis here is what the old flat
+    // `r.deictic = false` was for, and that part was right.
+    for (const char* said : {"come here", "bring it closer, come here"}) {
+        SRawIntent r = eng.detect(mk(said));
+        CHECK_MESSAGE(r.verb == EVerb::MoveDist, said);
+        CHECK_MESSAGE(!r.deictic, said);
+        CHECK_MESSAGE(r.deicticWordMs == 0, said);
+    }
+}
+
+TEST_CASE("intent: a bare 'move closer' uses the monitor gazed at utterance onset") {
+    CRuleIntent eng(icfg());
+    // No subject was spoken at all. Round-8 decision: gaze-first. The monitor you are
+    // LOOKING at is what a bare direction means far more often than whatever `openxr
+    // select` last stuck to — the compositor's selection is sticky and can be minutes old.
+    // With no deictic word to time the query from, the utterance ONSET is used.
+    SAction a = eng.resolve(mk("move closer"), fixture(), gazeAt(4, "XR-web"));
+    CHECK(a.verb == EVerb::MoveDist);
+    CHECK(a.target == "XR-web");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+    CHECK(a.gaze.requestedMs == 100000); // mk()'s onset
+
+    // Gaze says nothing -> the historical hover/selection fallback, and it is labelled
+    // Active because that is what it is (tier 2 of the compositor's resolveSelected()).
+    SAction b = eng.resolve(mk("move closer"), fixture(), gazeAt(-1, ""));
+    CHECK(b.verb == EVerb::MoveDist);
+    CHECK(b.target == "XR-web");         // fixture's hovered monitor
+    CHECK(b.targetSource == ETargetSource::Active);
+
+    // A named subject still beats the gaze, as everywhere else.
+    SAction c = eng.resolve(mk("move the coding monitor closer"), fixture(), gazeAt(4, "XR-web"));
+    CHECK(c.target == "XR-code");
+    CHECK(c.targetSource == ETargetSource::Semantic);
+}
+
+TEST_CASE("intent: only a SPOKEN 'active'/'focused' resolves to target=active") {
+    CRuleIntent eng(icfg());
+    for (const char* said : {"move the active monitor closer", "move the focused screen closer",
+                             "move the current monitor closer"}) {
+        // Even with a perfectly good gaze pick available, the spoken word wins: the user
+        // asked for the compositor's selection by name.
+        SAction a = eng.resolve(mk(said), fixture(), gazeAt(4, "XR-web"));
+        CHECK_MESSAGE(a.verb == EVerb::MoveDist, said);
+        CHECK_MESSAGE(a.target == "active", said);
+        CHECK_MESSAGE(a.targetSource == ETargetSource::Active, said);
+    }
+    // "the active coding monitor" has a content word in it — it names XR-code.
+    SAction b = eng.resolve(mk("move the active coding monitor closer"), fixture(), noGaze);
+    CHECK(b.target == "XR-code");
+    CHECK(b.targetSource == ETargetSource::Semantic);
+}
+
+TEST_CASE("intent: 'put the coding monitor here' keeps BOTH the name and the place point") {
+    CRuleIntent eng(icfg());
+    // A place-deixis designates a POINT; it never competes with the subject for the name
+    // slot. The old wantDeixis gate suppressed the gaze query whenever a confident name
+    // was matched, so this utterance silently lost its "here" and degraded to a
+    // freeze-in-place on whatever the compositor had selected.
+    SAction a = eng.resolve(mk("put the coding monitor here"), fixture(), gazeAt(-1, ""));
+    CHECK(a.verb == EVerb::Place);
+    CHECK(a.target == "XR-code");
+    CHECK(a.targetSource == ETargetSource::Semantic);
+    CHECK(a.gaze.valid);
+    CHECK(a.gaze.placeDistM > 0.0);
+
+    // The anaphoric subject ("it" — the thing you are carrying) still defers to the
+    // compositor's selection, which for a place is the right answer rather than a guess.
+    SAction b = eng.resolve(mk("place it here"), fixture(), gazeAt(-1, ""));
+    CHECK(b.target == "active");
+    CHECK(b.targetSource == ETargetSource::Deixis);
+    CHECK(b.gaze.placeDistM > 0.0);
+}

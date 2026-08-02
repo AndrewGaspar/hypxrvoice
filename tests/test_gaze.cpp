@@ -207,3 +207,80 @@ TEST_CASE("gaze: a compositor-reported hit point wins over the projection") {
     CHECK(r.place[1] == doctest::Approx(1.3));
     CHECK(r.place[2] == doctest::Approx(-2.1));
 }
+
+// ---------------------------------------------------------------------------
+// Round 8: the stability window decides WHICH candidate was meant, never WHEN.
+//
+// Every live "create a monitor here" logged ageMs ≈ 500 — exactly deixis_lead_ms(200) +
+// deixis_window_ms(300), i.e. the OLDEST sample in the window. The representative sample
+// used to be "highest dwellSec, first one wins a tie", and a deixis aimed at passthrough
+// (which "here" usually is) reports dwellSec = 0.000 in EVERY sample, so the tie-break
+// fell through to first-pushed — the oldest. The monitor then landed where the user had
+// been looking half a second before they spoke.
+// ---------------------------------------------------------------------------
+
+namespace {
+    // A ring whose head pose encodes the instant it was asked for: x = at/1000. Lets a
+    // test read the timestamp of the sample that actually became the pose.
+    std::string gazeAtPose(int id, const char* name, double dwell, int64_t at) {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), R"json({
+            "ok":true,"viewValid":true,"timestampMs":%lld,
+            "head":{"pos":[%.6f,1.4,0],"quat":[0,0,0,1],"forward":[0,0,-1]},
+            "gaze":{"monitorId":%d,"name":"%s","selected":%s,"dwellSec":%.3f},
+            "query":{"requestedTimestampMs":%lld,"matchedTimestampMs":%lld,"ageMs":0}
+        })json",
+                      (long long)at, static_cast<double>(at) / 1000.0, id,
+                      id >= 0 ? name : "", id >= 0 ? "true" : "false", dwell,
+                      (long long)at, (long long)at);
+        return buf;
+    }
+}
+
+TEST_CASE("gaze: the pose comes from the WORD, not from the oldest window sample") {
+    SDesktopContext ctx = ctxWith("XR-1");
+    SGazeConfig cfg; cfg.samples = 5; cfg.windowMs = 300; cfg.leadMs = 200;
+
+    // The live shape: a passthrough deixis, so dwellSec ties at 0.000 everywhere and the
+    // old "highest dwell" pick degenerated to first-pushed.
+    GazeQueryFn q = [](int64_t at) { return gazeAtPose(-1, "", 0.0, at); };
+    SGazeResolution r = resolveDeixis(100000, cfg, q, &ctx);
+    REQUIRE(r.valid);
+    CHECK(r.requestedMs == 100000);
+    // The lead shift is deliberate and is the WHOLE offset: 200 ms, not 200 + 300.
+    CHECK(r.matchedMs == 99800);
+    CHECK(r.ageMs == 200);
+    CHECK(r.pos[0] == doctest::Approx(99.8)); // the pose really is the anchor sample's
+}
+
+TEST_CASE("gaze: the modal vote still spans the whole window") {
+    SDesktopContext ctx = ctxWith("XR-1");
+    SGazeConfig cfg; cfg.samples = 5; cfg.windowMs = 400; cfg.leadMs = 0;
+
+    // A saccade onto XR-9 across the two NEWEST samples. The pose must come from the word
+    // instant, but the CANDIDATE is still the majority — the newest sample alone cannot
+    // carry the pick.
+    GazeQueryFn q = [](int64_t at) {
+        if (at > 99800) return gazeAtPose(9, "XR-9", 0.05, at);
+        return gazeAtPose(3, "XR-1", 0.30, at);
+    };
+    SGazeResolution r = resolveDeixis(100000, cfg, q, &ctx);
+    CHECK(r.monitorId == 3);   // majority still wins the identity
+    CHECK(r.agreeCount == 3);
+    CHECK(r.stable);
+    // …and the pose is the newest sample that AGREED with that majority, not the newest
+    // sample overall (which was the saccade).
+    CHECK(r.matchedMs == 99800);
+    CHECK(r.pos[0] == doctest::Approx(99.8));
+}
+
+TEST_CASE("gaze: a settled dwell still breaks a tie between equidistant samples") {
+    SDesktopContext ctx = ctxWith("XR-1");
+    SGazeConfig cfg; cfg.samples = 1; cfg.windowMs = 0; cfg.leadMs = 150;
+    GazeQueryFn q = [](int64_t at) { return gazeAtPose(3, "XR-1", 0.8, at); };
+    SGazeResolution r = resolveDeixis(50000, cfg, q, &ctx);
+    REQUIRE(r.valid);
+    CHECK(r.matchedMs == 49850); // one sample, at the lead-shifted word instant
+    CHECK(r.ageMs == 150);
+    CHECK(r.dwellSec == doctest::Approx(0.8));
+}

@@ -99,7 +99,13 @@ center at that point; `-j openxr` shows `anchor.mode=local` and the new `pose.po
 
 ---
 
-## GAP 3 (nice-to-have) — name the resolved selection
+## GAP 3 (CLOSED — verified round 8) — name the resolved selection
+
+**Both halves ship.** `COpenXRManager::selectedName()`
+(Hyprland `src/openxr/OpenXRManager.cpp:3556`) exposes the resolved name and backs the
+`"selected"` field of `openxr status` (`src/openxr/XRIpc.cpp:65,122,167`); `cmdSelect`
+fires the `xrmonitorselect` socket2 event. Nothing further is needed here. The original
+request is kept below for provenance.
 
 Already proposed in `research/VOICE-CONTROL.md` §8a (WP-T2/T3); restated here because the
 executor's `active` path benefits directly.
@@ -116,7 +122,18 @@ the target only when the daemon resolved a concrete name itself (semantic/deixis
 
 ---
 
-## GAP 4 (open) — the gaze reply carries no ray/monitor INTERSECTION point
+## GAP 4 (CLOSED — verified round 8) — the gaze reply carries no ray/monitor INTERSECTION point
+
+**Shipped.** Hyprland `68a6eb20` ("openxr: report the gaze ray/quad hit point in
+`hyprctl openxr gaze`") added `gaze.hitPoint` + `gaze.hitDistM`, emitted whenever the ray
+actually crosses a quad (`src/openxr/XRIpc.cpp` `openxrGaze()`). The daemon needed no
+change to consume it — `SGazeSample::parse` has read `gaze.hitPoint` opportunistically
+since round 5, and `SGazeResolution::placeFromHit` records which path was taken. The
+projection below remains in use for passthrough deixis, which is the common case for
+"here", and the minimum-distance clamp still applies to both paths. Original text kept
+for provenance.
+
+
 
 `hyprctl -j openxr gaze [at <ms>]` returns `head.pos`, `head.quat`, `head.forward`, and a
 gaze CANDIDATE (`gaze.monitorId` / `gaze.name` / `gaze.selected` / `gaze.dwellSec`) — but
@@ -153,6 +170,53 @@ one outcome that must be structurally impossible.
 
 ---
 
+## GAP 5 (open, low priority) — aiming a relative move needs a STICKY side effect
+
+**Why.** `distance`, `move`, `rotate`, `scale`, `center`, `adaptive`, `dock`, `undock` and
+`roam` take **no monitor argument at all** (`cmdDistance`'s grammar is literally
+`distance <±m>` — Hyprland `src/openxr/OpenXRManager.cpp:4053`). They act on whatever
+`resolveSelected()` returns:
+
+```
+1. m_selectedMonitor     — what `openxr select <name>` last set. STICKY, no expiry.
+2. m_lastHoveredMonitor  — last monitor crossed by the pointer ray.
+3. focused output, if it has an XR layer.
+```
+
+So the only way for `hypxrvoice` to aim "move **this** monitor closer" at the monitor the
+user was actually looking at is to emit `openxr select <name>` first. That works — it is
+what the executor does, and round 8's fix makes it happen — but it **mutates global
+compositor state as a side effect of a one-shot voice command**. After the utterance,
+`active` means something different for every later keybind, script and dwell interaction,
+and nothing reverts it. A user who says "move this monitor closer" while looking at
+XR-web has silently re-pointed their `openxr center` keybind at XR-web too.
+
+**Proposed.** An optional leading target token on the relative verbs, resolved for that
+invocation only and leaving `m_selectedMonitor` untouched:
+
+```
+hyprctl openxr distance [<name>|active] <±m>
+hyprctl openxr center   [<name>|active]
+hyprctl openxr dock     [<name>|active] [here]
+…
+```
+
+Back-compatible: the existing one-token forms are unambiguous (`distance -0.25` — a
+signed number is not a monitor name), and omitting the token keeps today's
+`resolveSelected()` behaviour verbatim. `place <name>|active at …` and
+`anchor <name>|active <mode>` already have exactly this shape, so it is a consistency fix
+as much as a feature.
+
+**Acceptance test.** `openxr select XR-code`, then `openxr distance XR-web -0.25`, then
+`openxr status`: XR-web moved, and `selected` still reads `XR-code`.
+
+**Executor today.** Emits `select <name>` + the argument-less verb, and accepts the sticky
+side effect. This is *correct* — the right monitor moves — so it does not block anything;
+it is filed because the side effect is invisible to the user and surprising later. See
+`docs/DEIXIS-SEMANTICS.md` §2.
+
+---
+
 ## Verbs used as-is (no gap)
 
 `select`, `anchor <name> <mode>`, `distance <±m>`, `center`, `adaptive on|off`,
@@ -163,6 +227,10 @@ runtime-created monitors are never touched by config reconciliation), and
 `dispatch moveworkspacetomonitor <N> <name>`. Read side:
 `monitors -j`, `clients -j`, `-j openxr status`, and `-j openxr gaze at <ms>` — all
 read-only, all shipping.
+
+**Caveat on the argument-less verbs.** `distance`, `center`, `dock`, `undock`, `roam`,
+`adaptive` are used verbatim but must be preceded by `select <name>` to be aimed; see
+GAP 5 for the sticky side effect that entails.
 
 **`create` is accepted before the output exists.** `openxr create` returns as soon as the
 compositor takes the request; the monitor is registered asynchronously, so a `place

@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
@@ -157,15 +158,20 @@ SGazeResolution resolveDeixis(int64_t wordMs, const SGazeConfig& cfg,
     const int64_t span   = std::max(0, cfg.windowMs);
 
     // Sample evenly across [anchor-span, anchor]. Newest (anchor) first isn't required;
-    // we tally the modal candidate.
+    // we tally the modal candidate. `askedAt` keeps the instant each sample was asked
+    // for, because the POSE we finally report has to come from the sample nearest the
+    // word — see the representative-sample pick below.
     std::vector<SGazeSample> samples;
+    std::vector<int64_t>     askedAt;
     for (int i = 0; i < n; i++) {
         int64_t at = anchor;
         if (n > 1)
             at = anchor - span + (span * i) / (n - 1);
         SGazeSample s = SGazeSample::parse(query(at));
-        if (s.ok)
+        if (s.ok) {
             samples.push_back(s);
+            askedAt.push_back(at);
+        }
     }
     r.sampleCount = static_cast<int>(samples.size());
     if (samples.empty())
@@ -192,14 +198,31 @@ SGazeResolution resolveDeixis(int64_t wordMs, const SGazeConfig& cfg,
         }
     }
 
-    // Representative sample: the agreeing sample with the highest dwell (most settled).
-    const SGazeSample* rep = nullptr;
-    for (auto& s : samples) {
-        int id = s.selected ? s.monitorId : -1;
-        if (id != winner)
+    // Representative sample: among the samples that AGREED with the modal candidate, the
+    // one asked for NEAREST the lead-shifted word instant, tie-broken by higher dwell.
+    //
+    // Round 8. This used to be "highest dwell, first one wins on a tie", and every live
+    // "create a monitor here" logged ageMs ≈ 500 — exactly leadMs(200) + windowMs(300),
+    // i.e. the OLDEST sample in the window. The cause is that a deixis aimed at
+    // passthrough (which "here" usually is) reports dwellSec = 0.000 in every sample, so
+    // the dwell comparison ties everywhere and the first-pushed sample — the oldest — won
+    // every time. The head is a half-second stale by then, and the monitor lands where the
+    // user was looking BEFORE they said the word.
+    //
+    // The stability window's job is to decide WHICH candidate was meant; it was never
+    // supposed to decide WHEN. The vote still spans the whole window (a single saccade
+    // still cannot hijack the pick), but the POSE now comes from the word.
+    const SGazeSample* rep      = nullptr;
+    int64_t            repDelta = 0;
+    for (size_t i = 0; i < samples.size(); i++) {
+        const SGazeSample& s = samples[i];
+        if ((s.selected ? s.monitorId : -1) != winner)
             continue;
-        if (!rep || s.dwellSec > rep->dwellSec)
-            rep = &s;
+        const int64_t delta = std::llabs(askedAt[i] - anchor);
+        if (!rep || delta < repDelta || (delta == repDelta && s.dwellSec > rep->dwellSec)) {
+            rep      = &s;
+            repDelta = delta;
+        }
     }
     if (!rep)
         rep = &samples.back();
