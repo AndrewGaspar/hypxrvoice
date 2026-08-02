@@ -209,6 +209,16 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setInt(out.asr.threads, val);
         } else if (k == "asr.translate") {
             setBool(out.asr.translate, val);
+        } else if (k == "asr.vocab_bias") {
+            setBool(out.asr.vocabBias, val);
+        } else if (k == "asr.vocab_bias_max_terms") {
+            setInt(out.asr.vocabBiasMaxTerms, val);
+        } else if (k == "asr.vocab_bias_max_tokens") {
+            setInt(out.asr.vocabBiasMaxTokens, val);
+        } else if (k == "asr.vocab_bias_min_voiced_ms") {
+            setInt(out.asr.vocabBiasMinVoicedMs, val);
+        } else if (k == "asr.vocab_bias_refresh_ms") {
+            setInt(out.asr.vocabBiasRefreshMs, val);
         } else if (k == "feedback.stdout_json") {
             setBool(out.feedback.stdoutJson, val);
         } else if (k == "feedback.notify") {

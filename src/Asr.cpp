@@ -46,6 +46,11 @@ bool CAsr::load(const SParams& params, std::string& err) {
     }
     m_dtw    = false;
     m_params = params;
+    // Prompt tokens are model-specific; drop them and re-tokenize below against the
+    // context we are about to build (a reload can change the model entirely).
+    const std::string keepBias = m_biasText;
+    m_biasText.clear();
+    m_biasTokens.clear();
     if (params.modelPath.empty()) {
         err = "no ASR model configured (set asr.model in config.toml; run scripts/fetch-models.sh)";
         return false;
@@ -89,10 +94,49 @@ bool CAsr::load(const SParams& params, std::string& err) {
     }
     m_ctx = ctx;
     Log::log(Log::INFO, "ASR model loaded: {} (DTW word timestamps: {})", params.modelPath, m_dtw ? "on" : "off");
+    if (!keepBias.empty())
+        setVocabBias(keepBias, m_biasBudget);
     return true;
 }
 
-STranscript CAsr::transcribe(const std::vector<float>& samples, int64_t bufferStartMs, int64_t onsetMs, int64_t endMs, EActivation activation) {
+int CAsr::setVocabBias(const std::string& text, int maxTokens) {
+    if (text == m_biasText && (text.empty() || !m_biasTokens.empty()) && maxTokens == m_biasBudget)
+        return m_biasRawTokens; // unchanged — don't re-tokenize on every window
+    m_biasText.clear();
+    m_biasTokens.clear();
+    m_biasRawTokens = 0;
+    if (text.empty() || !m_ctx)
+        return 0;
+
+    auto* ctx = static_cast<whisper_context*>(m_ctx);
+    // whisper itself uses at most n_text_ctx/2 prompt tokens (224 for base.en); asking
+    // for more silently wastes the tail of the prompt, so clamp to what it will honour.
+    const int hardCap = std::max(1, whisper_n_text_ctx(ctx) / 2 - 1);
+    const int budget  = std::clamp(maxTokens, 1, hardCap);
+    m_biasBudget      = maxTokens;
+
+    std::vector<whisper_token> toks(text.size() + 8);
+    const int n = whisper_tokenize(ctx, text.c_str(), toks.data(), static_cast<int>(toks.size()));
+    if (n <= 0) {
+        Log::log(Log::WARN, "vocab bias: whisper_tokenize failed; bias disabled for this window");
+        return 0;
+    }
+    m_biasRawTokens = n;
+    toks.resize(static_cast<size_t>(n));
+    if (n > budget) {
+        // Keep the TAIL: the exemplar script ends with the fixed command-verb sentences,
+        // which are the part that must never be dropped.
+        toks.erase(toks.begin(), toks.begin() + (n - budget));
+        Log::log(Log::DEBUG, "vocab bias truncated {} -> {} tokens", n, budget);
+    }
+    m_biasText = text;
+    m_biasTokens.assign(toks.begin(), toks.end());
+    Log::log(Log::DEBUG, "vocab bias installed: {} tokens, \"{}\"", m_biasTokens.size(), m_biasText);
+    return n;
+}
+
+STranscript CAsr::transcribe(const std::vector<float>& samples, int64_t bufferStartMs, int64_t onsetMs, int64_t endMs, EActivation activation,
+                             bool useVocabBias) {
     STranscript out;
     out.onsetMs    = onsetMs;
     out.endMs      = endMs;
@@ -115,6 +159,13 @@ STranscript CAsr::transcribe(const std::vector<float>& samples, int64_t bufferSt
     wp.token_timestamps = true; // needed for word boundaries (and DTW fields)
     wp.no_timestamps    = false;
     wp.single_segment   = false;
+
+    // WP-V7 vocabulary bias. prompt_tokens (not initial_prompt) so the budget applied in
+    // setVocabBias is the one whisper actually decodes with.
+    if (useVocabBias && !m_biasTokens.empty()) {
+        wp.prompt_tokens   = reinterpret_cast<const whisper_token*>(m_biasTokens.data());
+        wp.prompt_n_tokens = static_cast<int>(m_biasTokens.size());
+    }
 
     if (whisper_full(ctx, wp, samples.data(), static_cast<int>(samples.size())) != 0) {
         Log::log(Log::ERR, "whisper_full failed");

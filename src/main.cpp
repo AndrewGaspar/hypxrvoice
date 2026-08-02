@@ -9,10 +9,12 @@
 #include "IntentPipeline.hpp"
 #include "Log.hpp"
 #include "Pipeline.hpp"
+#include "VocabBias.hpp"
 #include "PttWindow.hpp"
 #include "Vad.hpp"
 #include "Wav.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <csignal>
 #include <cstdio>
@@ -73,6 +75,27 @@ static int runOneshot(const std::string& file, const SConfig& cfg, bool runInten
         } else {
             Log::log(Log::WARN, "llama backend unavailable ({}); using rule backend", lerr);
         }
+    }
+
+    // WP-V7: the offline path installs the SAME vocabulary bias the daemon would, from a
+    // live read-only compositor snapshot, so a replayed dump is transcribed under the
+    // conditions that produced it (and so `--oneshot` is the A/B tool for the bias).
+    if (cfg.asr.vocabBias) {
+        SVocabBiasConfig vc;
+        vc.maxTerms  = cfg.asr.vocabBiasMaxTerms;
+        vc.maxTokens = cfg.asr.vocabBiasMaxTokens;
+        SDesktopContext dctx = snapshotDesktop(defaultHyprctlQuery);
+        std::string     bias;
+        // Same fit-by-dropping-terms loop the daemon uses (see CDaemon::refreshVocabBias).
+        for (int attempt = 0; attempt < 5; attempt++) {
+            bias = VocabBias::build(dctx, vc);
+            const int raw = asr.setVocabBias(bias, cfg.asr.vocabBiasMaxTokens);
+            if (raw <= cfg.asr.vocabBiasMaxTokens || vc.maxTerms <= 2)
+                break;
+            vc.maxTerms    = std::max(2, vc.maxTerms - std::max(1, vc.maxTerms / 4));
+            vc.maxMonitors = std::min(vc.maxMonitors, vc.maxTerms);
+        }
+        Log::log(Log::INFO, "vocab bias: {} tokens — \"{}\"", asr.vocabBiasTokens(), bias);
     }
 
     std::vector<float> audio;

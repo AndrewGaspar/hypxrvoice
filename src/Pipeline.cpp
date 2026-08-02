@@ -1,7 +1,9 @@
 #include "Pipeline.hpp"
+#include "Log.hpp"
 #include "WakeWord.hpp"
 
 #include <algorithm>
+#include <cctype>
 
 namespace Pipeline {
     SVadConfig vadConfig(const SConfig& cfg) {
@@ -21,11 +23,55 @@ namespace Pipeline {
         return vc;
     }
 
+    bool vocabBiasAllowed(const SConfig& cfg, const SSpeechSegment& seg) {
+        if (!cfg.asr.vocabBias)
+            return false;
+        if (cfg.asr.vocabBiasMinVoicedMs <= 0)
+            return true; // guard explicitly disabled
+        if (seg.samples.empty())
+            return false;
+        const SSpeechPresence p = detectSpeechPresence(seg.samples.data(), seg.samples.size(), vadConfig(cfg));
+        return p.voicedMs >= cfg.asr.vocabBiasMinVoicedMs;
+    }
+
+    bool isPromptEcho(const std::string& text, const std::string& prompt) {
+        if (prompt.empty())
+            return false;
+        // Compare on letters+digits only, lowercased: whisper re-punctuates and re-cases
+        // freely, so a raw substring test would miss the very case we care about
+        // ("Move Plex here" vs "move plex here.").
+        auto squash = [](const std::string& s) {
+            std::string o;
+            for (char c : s)
+                if (std::isalnum(static_cast<unsigned char>(c)))
+                    o += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return o;
+        };
+        const std::string t = squash(text);
+        // A short utterance is LEGITIMATELY a substring of the prompt — that is the whole
+        // point, "Plex" and "Move Plex here" are both in there on purpose. Only a run long
+        // enough to be a replayed stretch of the script counts as an echo.
+        if (t.size() < 40)
+            return false;
+        return squash(prompt).find(t) != std::string::npos;
+    }
+
     bool processSegment(CAsr& asr, const SConfig& cfg, const SSpeechSegment& seg,
                         EActivation activation, bool requireWake, STranscript& out) {
-        out = asr.transcribe(seg.samples, seg.bufferStartMs, seg.onsetMs, seg.endMs, activation);
+        const bool bias = vocabBiasAllowed(cfg, seg);
+        if (cfg.asr.vocabBias && !bias && !asr.vocabBias().empty())
+            Log::log(Log::DEBUG, "vocab bias suppressed for this segment (under {}ms voiced)",
+                     cfg.asr.vocabBiasMinVoicedMs);
+        out = asr.transcribe(seg.samples, seg.bufferStartMs, seg.onsetMs, seg.endMs, activation, bias);
         if (out.text.empty())
             return false;
+        if (bias && isPromptEcho(out.text, asr.vocabBias())) {
+            // The decoder replayed our own prompt instead of the audio. Nothing the user
+            // said is in there, so treat it as no speech rather than actuating on it.
+            out.text.clear();
+            out.words.clear();
+            return false;
+        }
 
         if (requireWake && cfg.wake.enabled) {
             std::string stripped;

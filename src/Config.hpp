@@ -89,6 +89,29 @@ struct SConfig {
         std::string language = "en";
         int         threads  = 4;
         bool        translate = false;
+
+        // WP-V7 vocabulary bias: prime each transcription with a short script of
+        // plausible commands over the windows/monitors that are live RIGHT NOW, so
+        // whisper stops guessing "clicks" at Plex and "what's up" at WhatsApp. Measured
+        // +7/12 exact matches on the degraded-speech corpus for ~+150 ms. Built at
+        // capture-window open (never mid-transcribe). See VocabBias.hpp.
+        bool vocabBias = true;
+        int  vocabBiasMaxTerms   = 12;  // vocabulary terms woven into the script
+        // Whisper prompt-token ceiling. This is the LATENCY knob — the decoder attends
+        // over every prompt token — and it is bounded well below whisper's own cap of
+        // 224 for a measured reason: a ~127-token prompt reproducibly tipped one real
+        // recording into a decode repetition loop that whisper's temperature fallback
+        // then spent five extra passes repairing (1.5 s -> 6.2 s). At <=96 tokens the
+        // cliff did not appear in 48 runs, and accuracy was unchanged (11/12 either way).
+        // The budget is met by dropping vocabulary TERMS, not by truncating the prompt.
+        int  vocabBiasMaxTokens  = 96;
+        // Hallucination guard: a buffer carrying less voiced audio than this is
+        // transcribed WITHOUT the bias. A prompt makes whisper confident, and on
+        // near-silence that confidence is spent inventing text — see CAsr::transcribe.
+        int  vocabBiasMinVoicedMs = 200;
+        // How long a built prompt is reused before the desktop is re-snapshotted (the
+        // wake-word path has no window-open event to hang a rebuild on).
+        int  vocabBiasRefreshMs   = 5000;
     } asr;
 
     struct {

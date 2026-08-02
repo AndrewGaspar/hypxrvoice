@@ -77,6 +77,7 @@ add_library(hypxrvoice_core STATIC
     src/HudClient.cpp
     src/Tts.cpp
     src/Pipeline.cpp
+    src/VocabBias.cpp
     src/Command.cpp
     src/DesktopContext.cpp
     src/GazeResolver.cpp
@@ -139,6 +140,7 @@ add_executable(hypxrvoice_tests
     tests/test_executor.cpp
     tests/test_intent.cpp
     tests/test_pipeline.cpp
+    tests/test_vocabbias.cpp
     tests/test_llama.cpp
     tests/test_hud.cpp
     tests/test_tts.cpp

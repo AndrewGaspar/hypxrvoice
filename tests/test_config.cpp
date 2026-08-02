@@ -27,6 +27,11 @@ fuzz = 3
 model = "/models/ggml-base.en.bin"
 threads = 6
 translate = true
+vocab_bias = false
+vocab_bias_max_terms = 8
+vocab_bias_max_tokens = 96
+vocab_bias_min_voiced_ms = 350
+vocab_bias_refresh_ms = 2000
 )";
     SConfig                  c;
     std::vector<std::string> errs, warns;
@@ -45,6 +50,22 @@ translate = true
     CHECK(c.asr.model == "/models/ggml-base.en.bin");
     CHECK(c.asr.threads == 6);
     CHECK(c.asr.translate == true);
+    CHECK(c.asr.vocabBias == false);
+    CHECK(c.asr.vocabBiasMaxTerms == 8);
+    CHECK(c.asr.vocabBiasMaxTokens == 96);
+    CHECK(c.asr.vocabBiasMinVoicedMs == 350);
+    CHECK(c.asr.vocabBiasRefreshMs == 2000);
+}
+
+TEST_CASE("config: the vocabulary bias is on by default") {
+    SConfig c;
+    CHECK(c.asr.vocabBias == true);
+    CHECK(c.asr.vocabBiasMaxTerms > 0);
+    CHECK(c.asr.vocabBiasMaxTokens > 0);
+    // Held under whisper's own 224-token prompt cap — see Config.hpp for the measurement.
+    CHECK(c.asr.vocabBiasMaxTokens <= 112);
+    // Non-zero, or the hallucination guard is off and near-silence gets a prompt.
+    CHECK(c.asr.vocabBiasMinVoicedMs > 0);
 }
 
 TEST_CASE("config: unknown keys warn but do not fail") {

@@ -293,6 +293,89 @@ so it still segments on onset.
 its measured ambient across all seven dumped windows is ~0.0002 RMS and its speech peaks
 only ~0.03. The adaptive floor, not the fixed one, is what protects a hot source.
 
+### The ASR is biased toward the nouns that are on screen (WP-V7)
+
+`whisper base.en` has never heard of your apps, and it shows. Live, it produced
+**"clicks"** and **"plaques"** for *Plex*, **"what's up"** for *WhatsApp*, **"B-top"**
+for *btop*, **"ghost it"** for *ghostty*, and **"for"** / **"forward"** for the workspace
+number *four*. Every one of those is a reasonable English guess. The model is not broken —
+it is decoding without the one piece of context that settles the utterance: the window
+list the speaker is looking at. The daemon already builds that list for the intent tier.
+It now feeds the ASR too, via `whisper_full_params::prompt_tokens`.
+
+**The prompt is a script of commands, not a glossary.** This is the whole finding.
+Measured on a 12-phrase corpus (espeak-ng speech degraded with a real Quest/WiVRn ambient
+bed) against `ggml-base.en`, exact-match scoring:
+
+| prompt format | exact |
+|---|---|
+| *(none — the baseline)* | 3/12 |
+| bare comma list — `Plex, WhatsApp, btop.` | 4/12 |
+| `Voice commands for windows: <list>. Monitors: <list>. …` | 5/12 |
+| prose — `The windows on screen are Plex, WhatsApp …` | 9/12 |
+| **exemplar commands** — what the builder emits: `Move Plex here. Focus WhatsApp. Move btop to this monitor.` | **11/12** |
+
+A list of nouns barely moves the needle; the *same* nouns inside the sentence shapes the
+user actually speaks move it a long way, because the bias then lands on the whole
+(verb, noun, preposition) trajectory instead of an isolated token. So `VocabBias::build`
+emits a short rotating script — `Move <app> here. Focus <app>. Move <app> to this
+monitor. Move <app> to <monitor>.` — over the live vocabulary, plus a fixed tail carrying
+the command verbs and a spelled-out workspace number.
+
+The vocabulary is derived structurally, with **nothing to hand-maintain**: a class is
+reduced to the name a person would say (`com.mitchellh.ghostty` → `ghostty`,
+`chrome-web.whatsapp.com__-Default` → `whatsapp`, `google-chrome` → `chrome`), and title
+keywords are mined round-robin across windows — which is the only way `btop` and `nvtop`
+get in at all, since their identity exists nowhere but the title of a terminal. Terms are
+taken in **focus-recency order** so the cap drops the windows you are least likely to be
+naming, and the assembled prompt is truncated to an exact whisper-token budget.
+
+It is rebuilt at **capture-window open** — the moment the gate opens and before a word has
+been spoken — so the three read-only `hyprctl` queries never sit between the end of your
+sentence and the transcript. The wake-word path, which holds one long window, refreshes on
+a TTL instead.
+
+**The hallucination guard, and why `no_speech_prob` cannot be it.** A prompt makes whisper
+*confident*, and on audio with no speech in it that confidence is spent inventing text.
+Measured on real headset-mic ambient, the bias turned `[BLANK_AUDIO]` (no-speech
+probability **0.89**) into a fluent — and *actuatable* — `"Focus the browser."` and
+`"Move the monitor."`, at up to **4×** the decode time. Worse, it drove whisper's own
+`no_speech_prob` to **0.000** on every clip, biased or not: the prompt destroys the very
+signal you would want to police it with.
+
+So the guard is applied **before** the decode, on the audio. `Pipeline::vocabBiasAllowed`
+reuses `detectSpeechPresence` — the same pure function that decides whether a PTT window
+is worth transcribing at all — and biases only a buffer carrying at least
+`asr.vocab_bias_min_voiced_ms` (default 200 ms) of voiced audio. Every clip that produced
+a new actuatable hallucination measures **0 ms** voiced and is transcribed unbiased,
+exactly as it is today, with its no-speech verdict intact. A second, output-side guard
+(`Pipeline::isPromptEcho`) drops a transcript that is merely a long replay of the prompt.
+
+The single remaining miss is a clip whose synthesized *"Focus Plex"* is unintelligible to
+start with (unprompted it decodes as *"Focus the eggs"*). Against the eight **real**
+recordings of the user available offline, the bias changed no transcript for the worse.
+
+**Cost.** One RMS pass over the buffer, plus whisper decoding over the prompt. Measured
+interleaved (both arms under the same load) over eight real recordings × 3 rounds:
+
+| prompt | mean | median | p90 | max |
+|---|---|---|---|---|
+| none | 1415 ms | 1394 ms | 1550 ms | 1728 ms |
+| **the shipped default** (~92 tok) | **+195 ms** | **+161 ms** | 1817 ms | 2094 ms |
+| 8 terms (~64 tok) | +224 ms | +195 ms | 1865 ms | 1958 ms |
+
+`asr.vocab_bias_max_tokens` defaults to **96** rather than whisper's own 224, and that
+bound is empirical: a ~127-token prompt reproducibly tipped one real recording into a
+decode **repetition loop** — the correct sentence emitted fifty-five times — which
+whisper's temperature-fallback ladder then spent five extra decode passes repairing,
+turning 1.5 s into 6.2 s. At ≤ 96 tokens it did not appear in 48 runs, and accuracy was
+identical. (Disabling the fallback with `temperature_inc = 0` was tried and is *not* the
+fix: it simply lets the fifty-five repetitions through.) The budget is met by dropping
+vocabulary terms, never by truncating the prompt — the app names are the point.
+
+Turn the whole thing off with `asr.vocab_bias = false`; `hypxrvoicectl status` reports
+`vocabBiasTokens` and `vocabBiasAgeMs`.
+
 ### Capture forensics (`debug.dump_audio_dir`, off by default)
 
 When a leading word goes missing there are two very different causes — the source never

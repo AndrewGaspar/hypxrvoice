@@ -108,6 +108,30 @@ language = "en"
 threads = 4
 translate = false
 
+# Vocabulary bias (WP-V7). Each transcription is primed with a short script of plausible
+# commands over the windows and monitors that are LIVE right now, so whisper stops
+# guessing at names it has never heard: live, base.en heard "clicks"/"plaques" for Plex,
+# "what's up" for WhatsApp, "B-top" for btop and "for" for the workspace number four.
+# Measured on a degraded-speech corpus: 3/12 exact matches without, 10/12 with.
+# Built at capture-window open from a read-only compositor snapshot, never mid-utterance.
+vocab_bias = true
+vocab_bias_max_terms = 12   # app/monitor names woven into the script (focus-recency order)
+# The LATENCY knob: whisper decodes over every prompt token. Held well under whisper's
+# own 224 cap because a ~127-token prompt reproducibly tipped one real recording into a
+# decode repetition loop that cost 6 s to repair; at <=96 tokens that never appeared and
+# accuracy was identical. The budget is met by dropping terms, not truncating the prompt.
+vocab_bias_max_tokens = 96
+# Hallucination guard. A prompt makes whisper CONFIDENT, and on audio with no speech in
+# it that confidence is spent inventing text — measured on real headset-mic ambient, the
+# bias turned "[BLANK_AUDIO]" into a fluent, ACTUATABLE "Focus the browser." It also
+# drives whisper's own no_speech_prob to 0.000, so its no-speech verdict cannot police
+# the prompt. A buffer carrying less voiced audio than this is transcribed unbiased.
+# 0 disables the guard (not recommended).
+vocab_bias_min_voiced_ms = 200
+# How long a built prompt is reused before the desktop is re-snapshotted. Only matters
+# on the wake-word path, which has no window-open event to hang a rebuild on.
+vocab_bias_refresh_ms = 5000
+
 [feedback]
 stdout_json = true      # print each transcript as a JSON line on stdout
 notify = true           # notify-send toast (fallback when the HUD isn't showing it)

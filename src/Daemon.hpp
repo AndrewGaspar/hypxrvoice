@@ -11,6 +11,7 @@
 #include "PreRoll.hpp"
 #include "PttWindow.hpp"
 #include "Vad.hpp"
+#include "VocabBias.hpp"
 
 #include <atomic>
 #include <deque>
@@ -79,6 +80,13 @@ class CDaemon {
     std::string doReload();
 
     void resetVad();
+    // WP-V7: (re)build the ASR vocabulary bias from a LIVE desktop snapshot and install
+    // it on the ASR. Called at capture-window open — before a word has been spoken, so
+    // the three hyprctl reads are off the transcription critical path — and lazily from
+    // handleSegment when the cached prompt has aged past asr.vocab_bias_refresh_ms (the
+    // wake-word path has no window-open event to hang a rebuild on). `force` ignores the
+    // TTL. Main thread only; read-only queries, no compositor mutation.
+    void refreshVocabBias(bool force);
     void loadIntentBackend(); // (re)load the llama backend per config; rule fallback.
     void applyDumpConfig();   // (re)apply debug.dump_audio_dir; warns while it is on.
 
@@ -123,6 +131,7 @@ class CDaemon {
     bool       m_hudResultShown = false; // a result panel replaced "listening…" this window
     bool       m_windowProduced = false; // the open PTT window told the user something
     int64_t    m_lastAudioLogMs = 0;   // throttle for the periodic capture-stats DEBUG log
+    int64_t    m_vocabBiasBuiltMs = 0; // when the installed vocabulary bias was built (0 = never)
 
     // ---- persistent capture bookkeeping ----
     bool    m_captureActive     = false; // frames are reaching the VAD/ASR/wake tiers

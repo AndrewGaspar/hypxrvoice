@@ -27,6 +27,55 @@ CDaemon::~CDaemon() {
     if (m_epollFd >= 0) close(m_epollFd);
 }
 
+
+// WP-V7. Snapshot the live desktop (read-only hyprctl) and hand whisper a short script
+// of plausible commands over the windows and monitors that exist RIGHT NOW. Built here,
+// at window open, and never mid-transcribe: the three hyprctl reads cost tens of ms and
+// they must not sit between the user finishing a sentence and the transcript appearing.
+void CDaemon::refreshVocabBias(bool force) {
+    if (!m_cfg.asr.vocabBias) {
+        if (m_vocabBiasBuiltMs != 0) {
+            m_asr.setVocabBias("", m_cfg.asr.vocabBiasMaxTokens); // turned off by a reload
+            m_vocabBiasBuiltMs = 0;
+        }
+        return;
+    }
+    const int64_t now = Clock::monotonicMs();
+    if (!force && m_vocabBiasBuiltMs != 0 && now - m_vocabBiasBuiltMs < m_cfg.asr.vocabBiasRefreshMs)
+        return;
+
+    SVocabBiasConfig vc;
+    vc.enabled     = true;
+    vc.maxTerms    = m_cfg.asr.vocabBiasMaxTerms;
+    vc.maxTokens   = m_cfg.asr.vocabBiasMaxTokens;
+    vc.minVoicedMs = m_cfg.asr.vocabBiasMinVoicedMs;
+    vc.refreshMs   = m_cfg.asr.vocabBiasRefreshMs;
+
+    const int64_t   t0  = now;
+    SDesktopContext ctx = snapshotDesktop(defaultHyprctlQuery);
+
+    // Fit the token budget by dropping TERMS, not by truncating the assembled prompt.
+    // asr.vocab_bias_max_tokens is the latency knob — whisper decodes over every prompt
+    // token, measured at roughly 2 ms each on this box — and the cheapest thing to give
+    // up is the tail of the vocabulary, the windows the speaker is least likely to be
+    // naming. Truncating the string instead would sacrifice the app NAMES and keep the
+    // generic verb sentences, which is exactly backwards: the names are the whole point.
+    // CAsr::setVocabBias still truncates, as a hard backstop.
+    std::string bias;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        bias = VocabBias::build(ctx, vc);
+        const int raw = m_asr.setVocabBias(bias, m_cfg.asr.vocabBiasMaxTokens);
+        if (raw <= m_cfg.asr.vocabBiasMaxTokens || vc.maxTerms <= 2)
+            break;
+        vc.maxTerms = std::max(2, vc.maxTerms - std::max(1, vc.maxTerms / 4));
+        vc.maxMonitors = std::min(vc.maxMonitors, vc.maxTerms);
+    }
+    m_vocabBiasBuiltMs = Clock::monotonicMs();
+    Log::log(Log::DEBUG, "vocab bias rebuilt in {}ms ({} windows, {} monitors, {} terms, {} tokens)",
+             m_vocabBiasBuiltMs - t0, ctx.windows.size(), ctx.monitors.size(), vc.maxTerms,
+             m_asr.vocabBiasTokens());
+}
+
 void CDaemon::resetVad() {
     const SVadConfig vc = Pipeline::vadConfig(m_cfg);
     m_vad               = std::make_unique<CVad>(vc);
@@ -251,6 +300,10 @@ void CDaemon::finalizePttUtterance(const char* why) {
 }
 
 void CDaemon::handleSegment(const SSpeechSegment& seg) {
+    // Wake-word capture holds one long window, so openCaptureWindow's rebuild can be
+    // minutes stale by the time a segment lands. Refresh only when the TTL says so.
+    refreshVocabBias(/*force=*/false);
+
     // The backpad is the number that says whether a quiet first syllable could have
     // survived at all (see SVadConfig::onsetBackpadMs); log it on every segment so the
     // journal alone distinguishes "cut short" from "never arrived".
@@ -373,6 +426,10 @@ void CDaemon::startCapture(const std::string& source) {
 void CDaemon::openCaptureWindow() {
     resetVad();
     m_dump.beginWindow(Clock::monotonicMs());
+
+    // The gate has just opened and nothing has been said yet — the one moment in the
+    // window where a compositor snapshot is free. Rebuild the ASR vocabulary bias here.
+    refreshVocabBias(/*force=*/true);
 
     // A PRESS is an explicit declaration that speech is coming, so this window is
     // transcribed WHOLE and the VAD is demoted to endpointing (see PttWindow.hpp). The
@@ -637,6 +694,13 @@ std::string CDaemon::statusJson() const {
     // Is the OPEN window one that will be transcribed whole (PTT), rather than sliced by
     // VAD onset? Round-4 diagnosis wants this in one place with the rest of the capture state.
     o += ",\"pttWholeWindow\":" + std::string(m_pttWholeWindow ? "true" : "false");
+    // WP-V7: the vocabulary bias currently installed on the ASR — how many whisper tokens
+    // it costs and how old it is. `status` is where "did it pick up the app I just opened?"
+    // gets answered without turning on DEBUG logging.
+    o += ",\"vocabBias\":" + std::string(m_cfg.asr.vocabBias ? "true" : "false");
+    o += ",\"vocabBiasTokens\":" + std::to_string(m_asr.vocabBiasTokens());
+    o += ",\"vocabBiasAgeMs\":" +
+         std::to_string(m_vocabBiasBuiltMs == 0 ? -1 : Clock::monotonicMs() - m_vocabBiasBuiltMs);
     o += ",\"preRollBufferedMs\":" + std::to_string(m_preRoll.bufferedMs());
     // Live audio observability: input level (rolling ~1 s), VAD state, and the
     // frames-received counter — enough to tell a silent source from a dead path.
