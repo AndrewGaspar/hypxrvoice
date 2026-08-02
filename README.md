@@ -77,13 +77,28 @@ values are directly comparable.
 
 ### Intent tier + executor (WP-V4)
 
-Each transcript is turned into a **typed, closed-schema command** (`SAction`, 16 verbs)
-and then an allowlisted `hyprctl` plan. Twelve verbs drive the XR layer (pick, place,
-move, center, dock/undock, follow, anchor, hand input, launch); four drive plain
-Hyprland window management — **focus** ("focus the browser"), **fullscreen** ("make this
-window fullscreen"), **workspace** ("workspace three"), and **move_window** ("move
-terminal to the left monitor", "send the browser to workspace 3"). The window verbs are
-non-destructive and reversible, so they are permitted by default (`executor.allow_window`).
+Each transcript is turned into a **typed, closed-schema command** (`SAction`, 18 verbs)
+and then an allowlisted `hyprctl` plan. Thirteen verbs drive the XR layer (pick, place,
+move, center, dock/undock, follow, anchor, hand input, launch, **create_monitor** —
+"create a monitor here"); five drive plain Hyprland window management — **focus**
+("focus the browser"), **fullscreen** ("make this window fullscreen"), **workspace**
+("workspace three"), **move_window** ("move terminal to the left monitor", "send the
+browser to workspace 3"), and **move_workspace** ("move workspace 4 to this monitor").
+The window verbs are non-destructive and reversible, so they are permitted by default
+(`executor.allow_window`).
+
+Two safety rules earned the hard way on the first non-dry-run round:
+
+- **A deixis designates a point in FRONT of you.** A gaze sample gives a head *origin*
+  and a direction; `intent.place_distance_m` (default 1.3 m) projects along it and
+  `intent.place_min_distance_m` (0.5 m) is a hard floor on every candidate point. Passing
+  the head origin through was what dropped a monitor *at the HMD*.
+- **An unmatched window reference never actuates.** A window phrase with content in it
+  that matches nothing live is a Clarify, never a fall-through to the focused window; and
+  a phrase whose subject is a *workspace* is never a window reference at all. In the
+  workspace **number slot** only, Whisper's predictable homophones are accepted
+  (`for`/`forward`→4, `to`/`too`→2, `ate`→8, `won`→1, `tree`/`free`→3) — that is how
+  "move workspace forward to this monitor" reaches `move_workspace 4`.
 
 - **Desktop-context snapshot** at utterance time — `hyprctl monitors -j` + `clients -j` +
   `-j openxr status` (all read-only) — enumerates live monitor names and the apps on

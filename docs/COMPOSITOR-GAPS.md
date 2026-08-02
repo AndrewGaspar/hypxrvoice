@@ -116,10 +116,50 @@ the target only when the daemon resolved a concrete name itself (semantic/deixis
 
 ---
 
+## GAP 4 (open) — the gaze reply carries no ray/monitor INTERSECTION point
+
+`hyprctl -j openxr gaze [at <ms>]` returns `head.pos`, `head.quat`, `head.forward`, and a
+gaze CANDIDATE (`gaze.monitorId` / `gaze.name` / `gaze.selected` / `gaze.dwellSec`) — but
+not the point where the ray actually met a quad. The compositor computes that
+intersection every frame to decide `gaze.monitorId`; it simply is not reported.
+
+The daemon therefore projects: `head.pos + normalize(head.forward) * intent.place_distance_m`
+(default 1.3 m), floored at `intent.place_min_distance_m`. That is correct for
+passthrough deixis ("here", pointing at nothing), but for "put it where I'm looking"
+while gazing at an existing monitor it lands at a fixed distance rather than ON the
+surface being looked at.
+
+**Wanted (pure status addition, no new verb).** Two optional fields inside the existing
+`gaze` object, present only when `selected` is true:
+
+```json
+"gaze": { "monitorId": 3, "name": "XR-code", "selected": true, "dwellSec": 0.42,
+          "hitPoint": [0.21, 1.33, -2.14], "hitDistM": 2.14 }
+```
+
+`hitPoint` in `LOCAL_FLOOR` meters — the same space `place` consumes, so it needs no
+conversion. `hitDistM` is redundant but free and makes "put it as far away as that one"
+trivial.
+
+**Daemon today.** `SGazeSample::parse()` already reads `gaze.hitPoint` (and `gaze.point`)
+opportunistically and prefers it over the projection when present, so shipping the field
+alone switches the daemon over with no release on this side. `SGazeResolution.placeFromHit`
+records which path was taken.
+
+**Note for whoever implements it.** The clamp stays regardless: the daemon pushes ANY
+candidate point — projected or compositor-reported — out to at least
+`place_min_distance_m` from the head. A monitor placed inside the wearer's head is the
+one outcome that must be structurally impossible.
+
+---
+
 ## Verbs used as-is (no gap)
 
 `select`, `anchor <name> <mode>`, `distance <±m>`, `center`, `adaptive on|off`,
-`dock [here]`, `undock`, `roam head|body`, `handinput on|off|auto|toggle`, and
-`dispatch exec -- <cmd>` (allowlisted launch) are used verbatim. Read side:
+`dock [here]`, `undock`, `roam head|body`, `handinput on|off|auto|toggle`,
+`create <name> <WxH>[@Hz]` (runtime monitor creation for "create a monitor here" —
+runtime-created monitors are never touched by config reconciliation), and
+`dispatch exec -- <cmd>` (allowlisted launch) are used verbatim. Hyprland-side:
+`dispatch moveworkspacetomonitor <N> <name>`. Read side:
 `monitors -j`, `clients -j`, `-j openxr status`, and `-j openxr gaze at <ms>` — all
 read-only, all shipping.

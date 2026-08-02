@@ -149,6 +149,8 @@ namespace Feedback {
         std::string subject = a.target;
         if (a.verb == EVerb::Workspace)
             subject = "ws" + std::to_string(a.workspace);
+        else if (a.verb == EVerb::MoveWorkspace)
+            subject = "ws" + std::to_string(a.workspace) + "->" + a.target;
         else if (!a.windowLabel.empty())
             subject = a.windowLabel;
         Log::log(Log::INFO, "intent [{}] target={} src={} conf={:.2f} steps={} {}",

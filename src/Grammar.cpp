@@ -35,7 +35,8 @@ namespace Grammar {
              "\"\\\"dock\\\"\" | \"\\\"undock\\\"\" | \"\\\"follow\\\"\" | "
              "\"\\\"anchor\\\"\" | \"\\\"hand_input\\\"\" | \"\\\"launch_app\\\"\" | "
              "\"\\\"focus\\\"\" | \"\\\"fullscreen\\\"\" | \"\\\"workspace\\\"\" | "
-             "\"\\\"move_window\\\"\"\n";
+             "\"\\\"move_window\\\"\" | \"\\\"move_workspace\\\"\" | "
+             "\"\\\"create_monitor\\\"\"\n";
 
         // target: one of the live monitor names, else "active" or "".
         g += "target ::= \"\\\"active\\\"\" | \"\\\"\\\"\"";

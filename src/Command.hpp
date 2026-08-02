@@ -39,6 +39,15 @@ enum class EVerb {
     // ONE live window to another output or workspace. Reversible like the rest of this
     // group (the window is not closed, resized, or hidden), so it shares allow_window.
     MoveWindow,
+    // "move workspace 4 to this monitor" — relocate a WHOLE numbered workspace onto
+    // another output (`dispatch moveworkspacetomonitor <N> <mon>`). Distinct from
+    // MoveWindow: the subject is a workspace index, never a window, which is exactly
+    // the confusion that made round 5's misfire dangerous.
+    MoveWorkspace,
+    // "create a monitor here" — materialize a NEW runtime XR monitor
+    // (`openxr create <name> <WxH>@<Hz>`), optionally placed at the projected gaze
+    // point. Runtime-created monitors are never touched by config reconciliation.
+    CreateMonitor,
 };
 
 const char* verbName(EVerb v);
@@ -66,9 +75,20 @@ struct SGazeResolution {
     bool    valid       = false;
     int     monitorId   = -1;     // -1 = looking at passthrough (missed every quad).
     std::string name;             // gaze candidate monitor name, if any.
+    // The HEAD ORIGIN at word time — where the user's EYES were, NOT where they were
+    // looking. Round 5's first live-fire proved why the distinction matters: the
+    // executor passed `pos` straight to `openxr place`, which dropped the monitor
+    // inside the user's head. Nothing that positions geometry may read `pos`.
     double  pos[3]      = {0, 0, 0};
     double  quat[4]     = {0, 0, 0, 1};
     double  forward[3]  = {0, 0, 0};
+    // The PROJECTED point the deixis designates — this is what "here" means and the
+    // ONLY field a placement command may use. It is the gaze-ray/monitor intersection
+    // when the compositor reports one, else head + normalize(forward)*place_distance_m,
+    // and it is always at least place_min_distance_m away from the head.
+    double  place[3]     = {0, 0, 0};
+    bool    placeFromHit = false; // true = a real ray/quad intersection, not a projection.
+    double  placeDistM   = 0.0;   // |place - pos|, the distance actually used.
     double  dwellSec    = 0.0;
     int64_t matchedMs   = 0;      // the ring sample actually used.
     int64_t requestedMs = 0;      // the word timestamp we asked for.

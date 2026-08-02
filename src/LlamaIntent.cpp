@@ -89,6 +89,12 @@ std::string CLlamaIntent::buildPrompt(const STranscript& t, const SDesktopContex
     p += "move_window relocates ONE window (\"move the terminal to the left monitor\"): "
          "put the spoken window name in `app` and the destination monitor in `target`, or "
          "set `workspace` when the destination is a workspace.\n";
+    p += "move_workspace relocates a WHOLE numbered workspace onto another output "
+         "(\"move workspace 4 to this monitor\"): put the number in `workspace` and the "
+         "destination monitor in `target`. A phrase whose SUBJECT is a workspace is never "
+         "a move_window.\n";
+    p += "create_monitor makes a NEW XR monitor (\"create a monitor here\"): leave "
+         "`target` empty — the daemon mints the name — and set place=true for \"here\".\n";
     p += "target MUST be one of the monitor names below, or \"active\" for "
          "this/that/selected, or \"\".\n";
     p += "Set deictic=true when the user says \"this\"/\"that\"; place=true for "

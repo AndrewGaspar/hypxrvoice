@@ -380,6 +380,33 @@ const SWindowInfo* SDesktopContext::focusedWindow() const {
     return (best && best->focusHistoryId == 0) ? best : nullptr;
 }
 
+std::string SDesktopContext::nextXrMonitorName() const {
+    for (int n = 2; n < 64; n++) {
+        std::string cand = "XR-" + std::to_string(n);
+        if (!hasMonitor(cand))
+            return cand;
+    }
+    return "";
+}
+
+std::string SDesktopContext::newXrMonitorMode() const {
+    int w = 0, h = 0;
+    for (auto& m : monitors) {
+        // A sane, plausible mode from a live XR monitor. Physical outputs are ignored —
+        // a 3440x1440 ultrawide is not what "another monitor" means in a headset.
+        if (!m.xr || m.width < 640 || m.height < 480 || m.width > 7680 || m.height > 4320)
+            continue;
+        w = m.width;
+        h = m.height;
+        break;
+    }
+    if (w == 0) {
+        w = 1920;
+        h = 1080;
+    }
+    return std::to_string(w) + "x" + std::to_string(h) + "@60";
+}
+
 namespace {
     // A CLOSED table of generic spoken nouns -> the concrete app-class stems that noun
     // may legitimately mean. Nobody says "focus the org.mozilla.firefox"; they say "the

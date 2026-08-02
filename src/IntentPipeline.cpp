@@ -7,6 +7,8 @@ namespace IntentPipeline {
         ic.gaze.windowMs = cfg.intent.deixisWindowMs;
         ic.gaze.leadMs   = cfg.intent.deixisLeadMs;
         ic.gaze.samples  = cfg.intent.deixisSamples;
+        ic.gaze.placeDistanceM    = cfg.intent.placeDistanceM;
+        ic.gaze.placeMinDistanceM = cfg.intent.placeMinDistanceM;
         ic.distanceStep  = cfg.intent.distanceStep;
         return ic;
     }
@@ -17,6 +19,7 @@ namespace IntentPipeline {
         ec.allowXrmonitor = cfg.executor.allowXrmonitor;
         ec.allowLaunch    = cfg.executor.allowLaunch;
         ec.allowWindow    = cfg.executor.allowWindow;
+        ec.allowCreateMonitor = cfg.executor.allowCreateMonitor;
         ec.distanceStep   = cfg.intent.distanceStep;
         ec.appAllowlist   = cfg.apps;
         ec.caps.targetedGrab = cfg.executor.targetedGrab;

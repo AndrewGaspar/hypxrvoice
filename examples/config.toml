@@ -161,6 +161,15 @@ deixis_window_ms = 300      # span sampled ending at the lead-shifted target
 deixis_lead_ms = 200        # shift the query earlier (gaze precedes the spoken word)
 deixis_samples = 5          # ring points sampled across the window (modal pick)
 distance_step_m = 0.25      # "closer"/"further" step
+# WHERE "HERE" IS. A gaze sample gives a head ORIGIN and a direction; the point a
+# place-deixis designates is projected this far along that ray. Passing the head origin
+# straight to `openxr place` is what dropped a monitor AT the HMD on the first live-fire
+# round — the projection is not optional.
+place_distance_m = 1.3      # arm's-length-plus, the natural "here" for a monitor
+# Hard floor on the distance from your head to any placed monitor. Every candidate point
+# — projected or compositor-reported — is pushed out to at least this, so a monitor
+# cannot land inside your head no matter what the gaze data says.
+place_min_distance_m = 0.5
 
 # ---- WP-V4: executor (typed command -> allowlisted hyprctl argv) ----
 [executor]
@@ -181,6 +190,10 @@ place_at_pose = true    # `openxr place <name> at x,y,z` — drop at the resolve
 # non-destructive and reversible — nothing in this class can close, kill, or relocate a
 # window — so they are permitted by default. dry_run still gates whether they run.
 allow_window = true
+# "create a monitor here" -> `openxr create XR-<n> <WxH@Hz>` (plus a place step when the
+# utterance carried a deixis). The name is minted by the daemon from the live monitor
+# list, never spoken. Additive and individually undoable (`hyprctl openxr destroy`).
+allow_create_monitor = true
 
 # ---- capture forensics (OFF by default — turn on only while debugging) ----
 # Setting dump_audio_dir writes MICROPHONE AUDIO TO DISK: for every capture window, the

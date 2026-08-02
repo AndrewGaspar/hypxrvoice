@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -52,6 +53,16 @@ SGazeSample SGazeSample::parse(const std::string& json) {
         readVec(h, "forward", s.forward, 3);
     }
     if (json_t* g = json_object_get(root, "gaze"); g && json_is_object(g)) {
+        // Forward-compat: use a real ray/quad intersection if the compositor ever grows
+        // one. Today's reply has no such field, so this stays false.
+        for (const char* k : {"hitPoint", "point"}) {
+            json_t* hp = json_object_get(g, k);
+            if (hp && json_is_array(hp) && json_array_size(hp) >= 3) {
+                readVec(g, k, s.hit, 3);
+                s.hasHit = true;
+                break;
+            }
+        }
         if (json_t* m = json_object_get(g, "monitorId"); m && json_is_integer(m))
             s.monitorId = static_cast<int>(json_integer_value(m));
         if (json_t* n = json_object_get(g, "name"); n && json_is_string(n))
@@ -87,6 +98,53 @@ std::string defaultGazeQuery(int64_t atMs) {
             out.append(buf.data(), n);
     }
     return out;
+}
+
+void projectPlacePoint(const double pos[3], const double forward[3], bool hasHit,
+                       const double hit[3], double distanceM, double minDistanceM,
+                       double out[3], double* outDistM) {
+    // Ray direction: the head forward, normalized. A zero/NaN forward (no view pose in
+    // the sample) degrades to LOCAL_FLOOR forward rather than to "no direction" — the
+    // one outcome we refuse is a point at the origin of the ray.
+    double dir[3] = {forward[0], forward[1], forward[2]};
+    double len    = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+    if (!(len > 1e-6) || !std::isfinite(len)) {
+        dir[0] = 0.0; dir[1] = 0.0; dir[2] = -1.0;
+        len    = 1.0;
+    }
+    for (double& d : dir)
+        d /= len;
+
+    const double minD = std::max(0.0, minDistanceM);
+    // Projection distance: a non-positive or absurd config value falls back to the
+    // floor, never to zero (zero is exactly the bug this function exists to prevent).
+    double projD = distanceM;
+    if (!std::isfinite(projD) || projD <= 0.0)
+        projD = std::max(minD, 1.3);
+
+    double p[3];
+    if (hasHit) {
+        p[0] = hit[0]; p[1] = hit[1]; p[2] = hit[2];
+    } else {
+        for (int i = 0; i < 3; i++)
+            p[i] = pos[i] + dir[i] * projD;
+    }
+
+    // Hard floor: no candidate point — projected OR compositor-reported — may sit inside
+    // the sphere of radius minD around the head. Anything that does is pushed back out
+    // along the ray.
+    double d[3] = {p[0] - pos[0], p[1] - pos[1], p[2] - pos[2]};
+    double dist = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!std::isfinite(dist) || dist < minD) {
+        for (int i = 0; i < 3; i++)
+            p[i] = pos[i] + dir[i] * minD;
+        dist = minD;
+    }
+
+    for (int i = 0; i < 3; i++)
+        out[i] = p[i];
+    if (outDistM)
+        *outDistM = dist;
 }
 
 SGazeResolution resolveDeixis(int64_t wordMs, const SGazeConfig& cfg,
@@ -160,6 +218,12 @@ SGazeResolution resolveDeixis(int64_t wordMs, const SGazeConfig& cfg,
     }
     for (int i = 0; i < 4; i++)
         r.quat[i] = rep->quat[i];
+
+    // The point "here" designates. Computed HERE, once, so every consumer reads the same
+    // projected point and none of them can accidentally place at the head origin.
+    r.placeFromHit = rep->hasHit;
+    projectPlacePoint(r.pos, r.forward, rep->hasHit, rep->hit, cfg.placeDistanceM,
+                      cfg.placeMinDistanceM, r.place, &r.placeDistM);
 
     // If the picked candidate names a monitor that is no longer live, drop the name
     // (still a valid world-point deixis, just not a monitor pick).

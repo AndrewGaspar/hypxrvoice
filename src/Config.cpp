@@ -261,6 +261,10 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setInt(out.intent.deixisSamples, val);
         } else if (k == "intent.distance_step_m") {
             setDouble(out.intent.distanceStep, val);
+        } else if (k == "intent.place_distance_m") {
+            setDouble(out.intent.placeDistanceM, val);
+        } else if (k == "intent.place_min_distance_m") {
+            setDouble(out.intent.placeMinDistanceM, val);
         } else if (k == "executor.dry_run") {
             setBool(out.executor.dryRun, val);
         } else if (k == "executor.allow_xrmonitor") {
@@ -273,6 +277,8 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.executor.placeAtPose, val);
         } else if (k == "executor.allow_window") {
             setBool(out.executor.allowWindow, val);
+        } else if (k == "executor.allow_create_monitor") {
+            setBool(out.executor.allowCreateMonitor, val);
         } else if (k == "debug.dump_audio_dir") {
             setStr(out.debug.dumpAudioDir, val);
         } else if (k == "debug.dump_audio_keep") {

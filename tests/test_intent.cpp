@@ -456,3 +456,193 @@ TEST_CASE("intent: the move grammar declines anything that is not one") {
     CHECK(eng.detect(mk("bring it closer")).verb == EVerb::MoveDist);
     CHECK(eng.detect(mk("push it further away")).verb == EVerb::MoveDist);
 }
+
+// ---------------------------------------------------------------------------
+// Round 5, Task C: an unmatched window reference must NEVER actuate.
+//
+// Live fire: "Move workspace forward to this monitor." parsed as move_window with a
+// deictic destination at confidence 0.90 and dispatched `movewindow mon:XR-main` on
+// whatever window happened to be focused. Two things were wrong: a workspace phrase was
+// read as a window reference, and an unmatched window reference silently fell through to
+// the focused window. The user had actually said "move workspace 4" — Whisper renders
+// "four" as "forward".
+// ---------------------------------------------------------------------------
+
+namespace {
+    // A fixture whose windows include btop, so the "named window that IS live" case is
+    // exercised against a real match rather than a hypothetical one.
+    SDesktopContext btopFixture() {
+        const char* mons = R"json([
+            {"id":0,"name":"eDP-1","focused":true,"x":0,"y":0,"width":1920,"height":1080},
+            {"id":3,"name":"XR-code","x":1920,"y":0,"width":1920,"height":1080},
+            {"id":4,"name":"XR-web","x":3840,"y":0,"width":1920,"height":1080}
+        ])json";
+        const char* cls = R"json([
+            {"class":"btop","title":"btop","monitor":3,"mapped":true,"address":"0xaaa","focusHistoryID":2},
+            {"class":"nvim","title":"main.cpp - NVIM","monitor":3,"mapped":true,"address":"0xbbb","focusHistoryID":0},
+            {"class":"firefox","title":"YouTube - Mozilla Firefox","monitor":4,"mapped":true,"address":"0xccc","focusHistoryID":1}
+        ])json";
+        const char* xr = R"json({"state":"focused","monitors":[
+            {"name":"XR-code","id":3,"anchor":{"mode":"local"}},
+            {"name":"XR-web","id":4,"hovered":true,"anchor":{"mode":"body"}}
+        ]})json";
+        return SDesktopContext::parse(mons, cls, xr);
+    }
+
+    GazeQueryFn gazeAt(int id, const char* name) {
+        return [=](int64_t at) {
+            char b[360];
+            std::snprintf(b, sizeof(b),
+                          R"json({"ok":true,"viewValid":true,"timestampMs":%lld,
+                          "head":{"pos":[0,1.4,0],"forward":[0,0,-1]},
+                          "gaze":{"monitorId":%d,"name":"%s","selected":%s,"dwellSec":0.3},
+                          "query":{"matchedTimestampMs":%lld,"ageMs":0}})json",
+                          (long long)at, id, id >= 0 ? name : "", id >= 0 ? "true" : "false",
+                          (long long)at);
+            return std::string(b);
+        };
+    }
+}
+
+TEST_CASE("intent: a workspace phrase is never a window reference") {
+    CRuleIntent eng(icfg());
+    SRawIntent r = eng.detect(mk("move workspace forward to this monitor"));
+    CHECK(r.verb == EVerb::MoveWorkspace);
+    CHECK(r.windowPhrase.empty());   // the dangerous fall-through, gone
+}
+
+TEST_CASE("intent: 'move workspace forward to this monitor' is workspace 4, not a window move") {
+    // The exact live-fire utterance. "forward" is Whisper's rendering of "four".
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move workspace forward to this monitor"), btopFixture(),
+                            gazeAt(3, "XR-code"));
+    CHECK(a.verb == EVerb::MoveWorkspace);
+    CHECK(a.workspace == 4);
+    CHECK(a.target == "XR-code");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+    CHECK(a.windowAddress.empty()); // no window is involved in this verb at all
+}
+
+TEST_CASE("intent: workspace number-slot homophones") {
+    CRuleIntent eng(icfg());
+    struct { const char* said; int want; } cases[] = {
+        {"move workspace four to the left monitor",    4},
+        {"move workspace for to the left monitor",     4},
+        {"move workspace forward to the left monitor", 4},
+        {"move workspace 4 to the left monitor",       4},
+        {"move workspace too to the left monitor",     2},
+        {"move workspace ate to the left monitor",     8},
+        {"move workspace won to the left monitor",     1},
+        {"move workspace tree to the left monitor",    3},
+    };
+    for (auto& c : cases) {
+        SAction a = eng.resolve(mk(c.said), btopFixture(), noGaze);
+        CHECK(a.verb == EVerb::MoveWorkspace);
+        CHECK(a.workspace == c.want);
+        CHECK(a.target == "eDP-1"); // leftmost by layout x
+    }
+}
+
+TEST_CASE("intent: the homophone table stays in the number slot") {
+    // "for"/"to" outside a workspace number slot must remain ordinary English — the
+    // guard against this becoming general fuzzy matching.
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move firefox to the left monitor"), btopFixture(), noGaze);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.workspace == 0);
+}
+
+TEST_CASE("intent: an unmatched window phrase clarifies instead of moving the focused window") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move the spreadsheet to the left monitor"), btopFixture(), noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.windowAddress.empty());
+    CHECK_FALSE(a.actionable());
+}
+
+TEST_CASE("intent: an explicit deixis still means the focused window") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move this to the left monitor"), btopFixture(), noGaze);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress.empty()); // "the one I am using" — the executor's active-window path
+    CHECK(a.target == "eDP-1");
+
+    SAction b = eng.resolve(mk("move this window to the left monitor"), btopFixture(), noGaze);
+    CHECK(b.verb == EVerb::MoveWindow);
+    CHECK(b.windowAddress.empty());
+}
+
+TEST_CASE("intent: a named window that IS live still resolves semantically") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move btop to the left monitor"), btopFixture(), noGaze);
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress == "0xaaa");
+    CHECK(a.target == "eDP-1");
+}
+
+TEST_CASE("intent: 'move the terminal to workspace three' keeps its window-move reading") {
+    // The workspace token is in the DESTINATION half here, not the subject.
+    CRuleIntent eng(icfg());
+    SRawIntent r = eng.detect(mk("move the terminal to workspace three"));
+    CHECK(r.verb == EVerb::MoveWindow);
+    CHECK(r.sub == "workspace");
+    CHECK(r.workspace == 3);
+}
+
+TEST_CASE("intent: a workspace move with no usable index clarifies") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move workspace to the left monitor"), btopFixture(), noGaze);
+    CHECK(a.verb == EVerb::Clarify);
+}
+
+// ---------------------------------------------------------------------------
+// Round 5, Task B: "create a monitor here".
+// ---------------------------------------------------------------------------
+
+TEST_CASE("intent: 'create a monitor here' mints a free name and carries the gaze point") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("create a monitor here"), btopFixture(), gazeAt(-1, ""));
+    CHECK(a.verb == EVerb::CreateMonitor);
+    CHECK(a.target == "XR-2");     // lowest free XR-<n>, nothing live collides
+    CHECK(a.gaze.valid);
+    CHECK(a.gaze.placeDistM > 0.0);
+    CHECK(a.gaze.place[2] == doctest::Approx(-1.3)); // 1.3 m ahead of the head at z=0
+}
+
+TEST_CASE("intent: create-monitor phrasings, and the ones that must NOT match") {
+    CRuleIntent eng(icfg());
+    for (const char* said : {"create a monitor here", "add a new monitor",
+                             "make a new screen here", "create a display"}) {
+        CHECK(eng.detect(mk(said)).verb == EVerb::CreateMonitor);
+    }
+    // A monitor noun alone, or a creation verb alone, is not a create.
+    CHECK(eng.detect(mk("make this window fullscreen")).verb == EVerb::Fullscreen);
+    CHECK(eng.detect(mk("move the coding monitor closer")).verb == EVerb::MoveDist);
+    CHECK(eng.detect(mk("open the browser")).verb == EVerb::LaunchApp);
+}
+
+TEST_CASE("intent: create-monitor skips names already in use") {
+    const char* mons = R"json([
+        {"id":0,"name":"eDP-1","focused":true},
+        {"id":3,"name":"XR-2"},
+        {"id":4,"name":"XR-3"}
+    ])json";
+    SDesktopContext ctx = SDesktopContext::parse(mons, "[]", "");
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("create a monitor"), ctx, noGaze);
+    CHECK(a.verb == EVerb::CreateMonitor);
+    CHECK(a.target == "XR-4");
+}
+
+TEST_CASE("intent: create-monitor needs the noun to FOLLOW the creation verb") {
+    CRuleIntent eng(icfg());
+    // The dangerous near-misses: both words present, no creation meant.
+    CHECK(eng.detect(mk("make this monitor follow me")).verb == EVerb::Follow);
+    CHECK(eng.detect(mk("make this monitor world locked")).verb == EVerb::Anchor);
+    CHECK(eng.detect(mk("make the coding monitor closer")).verb == EVerb::MoveDist);
+    CHECK(eng.detect(mk("dock this monitor here")).verb == EVerb::Dock);
+    // And the real thing, in the phrasings people actually use.
+    CHECK(eng.detect(mk("create another monitor")).verb == EVerb::CreateMonitor);
+    CHECK(eng.detect(mk("make me a new monitor here")).verb == EVerb::CreateMonitor);
+    CHECK(eng.detect(mk("open a new monitor")).verb == EVerb::CreateMonitor);
+}

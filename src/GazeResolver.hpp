@@ -32,6 +32,14 @@ struct SGazeSample {
     double      pos[3]    = {0, 0, 0};
     double      quat[4]   = {0, 0, 0, 1};
     double      forward[3]= {0, 0, 0};
+    // OPTIONAL gaze-ray/quad intersection. The compositor's `gaze` reply does NOT carry
+    // one today (its `gaze` object is monitorId/name/selected/dwellSec — see
+    // Hyprland src/openxr/XRIpc.cpp openxrGaze()), so this stays false and the resolver
+    // projects along `forward`. Parsed opportunistically from `gaze.hitPoint` (or
+    // `gaze.point`) so the day the compositor grows the field we use the real point
+    // with no daemon change.
+    bool        hasHit    = false;
+    double      hit[3]    = {0, 0, 0};
     int64_t     timestampMs = 0;
     int64_t     matchedMs   = 0;
     int64_t     requestedMs = 0;
@@ -46,7 +54,28 @@ struct SGazeConfig {
     int windowMs = 300; // span of the stability window ending at the lead-shifted target.
     int leadMs   = 200; // shift the query target this far before the word (gaze leads speech).
     int samples  = 5;   // ring points sampled across the window (>=1).
+    // PLACEMENT PROJECTION. "Here" is a point in FRONT of the user, never the user's own
+    // head. The gaze reply gives an origin + a direction; the point the word designates
+    // is origin + direction * placeDistanceM (unless the compositor hands us a real
+    // ray/quad intersection). placeMinDistanceM is a hard floor applied to EVERY
+    // candidate point — placing a monitor inside the wearer's head is structurally
+    // impossible, not merely unlikely.
+    double placeDistanceM    = 1.3;
+    double placeMinDistanceM = 0.5;
 };
+
+// Project the point a place-deixis designates. PURE, and the single definition of what
+// "here" means:
+//   * `hit` (a real gaze-ray/quad intersection) wins when `hasHit`;
+//   * otherwise pos + normalize(forward) * distanceM;
+//   * either way the result is pushed out along the ray until it is at least
+//     minDistanceM from `pos`.
+// A degenerate/absent forward vector falls back to LOCAL_FLOOR forward (0,0,-1), which
+// still lands the point outside the head rather than in it. `outDistM` receives the
+// final |out - pos|.
+void projectPlacePoint(const double pos[3], const double forward[3], bool hasHit,
+                       const double hit[3], double distanceM, double minDistanceM,
+                       double out[3], double* outDistM);
 
 // Queries `gaze at <ms>` for a given millisecond and returns the raw JSON. Injectable
 // so tests drive canned ring data with no compositor. argv is our own constants.

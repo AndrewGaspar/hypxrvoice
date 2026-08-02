@@ -123,8 +123,11 @@ TEST_CASE("pipeline: 'place it here' uses place-at-pose when advertised") {
     auto r = IntentPipeline::process(mk("drop it right here"), h.cfg,
                                      mockHyprctl(), mockGaze(-1, ""), h.runner);
     CHECK(r.action.verb == EVerb::Place);
-    // pos came from the mock gaze head/point [0.5,1.4,-1.2].
-    CHECK(h.ranLine("hyprctl openxr place active at 0.500,1.400,-1.200"));
+    // The mock gaze head is [0.5,1.4,-1.2] looking down -Z. The command must carry the
+    // point 1.3 m AHEAD of that head, not the head itself — placing at the head origin
+    // is what put a monitor inside the user's face on the first live-fire round.
+    CHECK(h.ranLine("hyprctl openxr place active at 0.500,1.400,-2.500"));
+    CHECK_FALSE(h.ranLine("hyprctl openxr place active at 0.500,1.400,-1.200"));
 }
 
 TEST_CASE("pipeline: 'move the coding monitor closer' -> semantic select + distance") {
@@ -227,4 +230,44 @@ TEST_CASE("pipeline: a named target that is not live is refused (no actuation)")
     // With no monitors, semantic fails and there is no hovered monitor -> active.
     // The executor may still target "active"; assert we never invented XR-code.
     CHECK_FALSE(h.ranLine("hyprctl openxr select XR-code"));
+}
+
+// ---------------------------------------------------------------------------
+// Round 5 acceptance: the live-fire misfire, end to end.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("pipeline: 'move workspace forward to this monitor' moves the WORKSPACE") {
+    Harness h;
+    auto r = IntentPipeline::process(mk("move workspace forward to this monitor"), h.cfg,
+                                     mockHyprctl(), mockGaze(4, "XR-web"), h.runner);
+    CHECK(r.action.verb == EVerb::MoveWorkspace);
+    CHECK(r.action.workspace == 4);
+    CHECK(r.action.target == "XR-web");
+    CHECK(h.ranLine("hyprctl dispatch moveworkspacetomonitor 4 XR-web"));
+    // The dangerous outcome: a movewindow on whatever was focused. Never again.
+    CHECK_FALSE(h.ranLine("hyprctl dispatch movewindow mon:XR-web"));
+    for (auto& v : h.ran)
+        CHECK(v[2] != "movewindow");
+}
+
+TEST_CASE("pipeline: an unmatched window phrase actuates NOTHING") {
+    Harness h;
+    auto r = IntentPipeline::process(mk("move the spreadsheet to this monitor"), h.cfg,
+                                     mockHyprctl(), mockGaze(4, "XR-web"), h.runner);
+    CHECK(r.action.verb == EVerb::Clarify);
+    CHECK_FALSE(r.plan.ok);
+    CHECK(h.ran.empty());
+}
+
+TEST_CASE("pipeline: 'create a monitor here' creates and places at the projected point") {
+    Harness h;
+    auto r = IntentPipeline::process(mk("create a monitor here"), h.cfg,
+                                     mockHyprctl(), mockGaze(-1, ""), h.runner);
+    CHECK(r.action.verb == EVerb::CreateMonitor);
+    CHECK(r.action.target == "XR-2");
+    REQUIRE(r.plan.ok);
+    // The mock context reports no pixel modes, so the default 1920x1080@60 is used.
+    CHECK(h.ranLine("hyprctl openxr create XR-2 1920x1080@60"));
+    // Head [0.5,1.4,-1.2] looking down -Z -> 1.3 m ahead.
+    CHECK(h.ranLine("hyprctl openxr place XR-2 at 0.500,1.400,-2.500"));
 }

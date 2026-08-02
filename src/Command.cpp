@@ -23,6 +23,8 @@ const char* verbName(EVerb v) {
         case EVerb::Fullscreen: return "fullscreen";
         case EVerb::Workspace:  return "workspace";
         case EVerb::MoveWindow: return "move_window";
+        case EVerb::MoveWorkspace:  return "move_workspace";
+        case EVerb::CreateMonitor:  return "create_monitor";
     }
     return "?";
 }
@@ -44,6 +46,8 @@ EVerb verbFromName(const std::string& s) {
     if (s == "fullscreen") return EVerb::Fullscreen;
     if (s == "workspace")  return EVerb::Workspace;
     if (s == "move_window") return EVerb::MoveWindow;
+    if (s == "move_workspace")  return EVerb::MoveWorkspace;
+    if (s == "create_monitor")  return EVerb::CreateMonitor;
     return EVerb::None;
 }
 
@@ -117,6 +121,11 @@ std::string SGazeResolution::toJson() const {
     appendEscaped(o, name);
     o += ",\"pos\":[" + num(pos[0]) + "," + num(pos[1]) + "," + num(pos[2]) + "]";
     o += ",\"forward\":[" + num(forward[0]) + "," + num(forward[1]) + "," + num(forward[2]) + "]";
+    // The projected deixis point (what "here" means). `pos` above is the head origin and
+    // is diagnostic only — see the SGazeResolution contract.
+    o += ",\"place\":[" + num(place[0]) + "," + num(place[1]) + "," + num(place[2]) + "]";
+    o += ",\"placeFromHit\":" + std::string(placeFromHit ? "true" : "false");
+    o += ",\"placeDistM\":" + num(placeDistM, "%.3f");
     o += ",\"dwellSec\":" + num(dwellSec, "%.3f");
     o += ",\"matchedMs\":" + std::to_string(matchedMs);
     o += ",\"requestedMs\":" + std::to_string(requestedMs);
@@ -153,7 +162,8 @@ std::string SAction::toJson() const {
         o += ",\"windowLabel\":";
         appendEscaped(o, windowLabel);
     }
-    if (verb == EVerb::Workspace || (verb == EVerb::MoveWindow && workspace > 0))
+    if (verb == EVerb::Workspace || verb == EVerb::MoveWorkspace ||
+        (verb == EVerb::MoveWindow && workspace > 0))
         o += ",\"workspace\":" + std::to_string(workspace);
     o += ",\"confidence\":" + num(confidence, "%.2f");
     if (verb == EVerb::Clarify) {

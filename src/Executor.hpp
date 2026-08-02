@@ -36,6 +36,11 @@ struct SExecConfig {
     // reversible — nothing in this class can close, kill, or relocate a window — so it
     // is permitted by default; dryRun still decides whether anything actually runs.
     bool allowWindow   = true;
+    // "create a monitor here". Additive and individually undoable (`hyprctl openxr
+    // destroy`), and runtime-created monitors are never touched by config
+    // reconciliation, so it rides with the rest of the XR verbs under allow_xrmonitor —
+    // this is the finer-grained off switch.
+    bool allowCreateMonitor = true;
     double distanceStep = 0.25; // default push/pull step (m) when the action gives none.
     // Allowlist: spoken app key -> a TRUSTED launch command (operator config). The
     // command is passed to `hyprctl dispatch exec -- <cmd>` verbatim; it is never

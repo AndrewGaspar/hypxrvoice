@@ -30,6 +30,8 @@ static const char* verbGerund(EVerb v) {
         case EVerb::Focus:      return "focusing";
         case EVerb::Fullscreen: return "fullscreen";
         case EVerb::Workspace:  return "workspace";
+        case EVerb::MoveWorkspace:  return "moving workspace";
+        case EVerb::CreateMonitor:  return "creating";
         default:               return "";
     }
 }
@@ -58,6 +60,10 @@ std::string hudActionPhrase(const SAction& a) {
     }
     if (a.verb == EVerb::Workspace)
         return "workspace " + std::to_string(a.workspace);
+    if (a.verb == EVerb::MoveWorkspace)
+        return "workspace " + std::to_string(a.workspace) + " \u2192 " + a.target;
+    if (a.verb == EVerb::CreateMonitor)
+        return "new monitor " + a.target;
     if (a.verb == EVerb::Focus || a.verb == EVerb::Fullscreen) {
         // Window verbs name a window, not a monitor — say which one when we resolved it.
         if (!a.windowLabel.empty())

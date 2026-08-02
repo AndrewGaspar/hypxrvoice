@@ -79,13 +79,36 @@ TEST_CASE("executor: place freezes in place by default (anchor local)") {
     CHECK(hasLine(p, "hyprctl openxr anchor active local"));
 }
 
-TEST_CASE("executor: place-at-pose uses the resolved gaze point when advertised") {
+TEST_CASE("executor: place-at-pose uses the PROJECTED gaze point, never the head origin") {
+    SAction a; a.verb = EVerb::Place; a.target = "active";
+    // Head at (0.5,1.4,-1.2) looking down -Z; the projected point is 1.3 m ahead of it.
+    a.gaze.valid = true; a.gaze.pos[0] = 0.5; a.gaze.pos[1] = 1.4; a.gaze.pos[2] = -1.2;
+    a.gaze.forward[2] = -1.0;
+    a.gaze.place[0] = 0.5; a.gaze.place[1] = 1.4; a.gaze.place[2] = -2.5;
+    a.gaze.placeDistM = 1.3;
+    SExecConfig cfg; cfg.caps.placeAtPose = true;
+    SExecPlan p = planFor(a, fixtureCtx(), cfg);
+    REQUIRE(p.ok);
+    CHECK(hasLine(p, "hyprctl openxr place active at 0.500,1.400,-2.500"));
+    // The head origin must appear nowhere in the plan.
+    CHECK_FALSE(hasLine(p, "hyprctl openxr place active at 0.500,1.400,-1.200"));
+}
+
+TEST_CASE("executor: an unprojected gaze (placeDistM==0) never becomes a place command") {
+    // A resolution that never went through projectPlacePoint() carries place=[0,0,0].
+    // Emitting it would drop the monitor at the LOCAL_FLOOR origin; the executor must
+    // fall back to freezing in place instead.
     SAction a; a.verb = EVerb::Place; a.target = "active";
     a.gaze.valid = true; a.gaze.pos[0] = 0.5; a.gaze.pos[1] = 1.4; a.gaze.pos[2] = -1.2;
     SExecConfig cfg; cfg.caps.placeAtPose = true;
     SExecPlan p = planFor(a, fixtureCtx(), cfg);
     REQUIRE(p.ok);
-    CHECK(hasLine(p, "hyprctl openxr place active at 0.500,1.400,-1.200"));
+    CHECK(p.approximated);
+    CHECK(hasLine(p, "hyprctl openxr anchor active local"));
+    for (auto& st : p.steps) {
+        const bool isPlace = st.argv.size() >= 3 && st.argv[2] == "place";
+        CHECK_FALSE(isPlace);
+    }
 }
 
 TEST_CASE("executor: follow issues adaptive on (and roam when a mode is given)") {
@@ -400,4 +423,92 @@ TEST_CASE("executor: validateStep pins the shape of the two move dispatchers") {
     CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movewindow", "mon:"}, ""}, err));
     CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movetoworkspace", "0"}, ""}, err));
     CHECK_FALSE(validateStep(SExecStep{{"hyprctl", "dispatch", "movetoworkspace", "abc"}, ""}, err));
+}
+
+// ---------------------------------------------------------------------------
+// Round 5: the workspace-move verb and runtime monitor creation.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("executor: move_workspace dispatches moveworkspacetomonitor") {
+    SAction a; a.verb = EVerb::MoveWorkspace; a.workspace = 4; a.target = "XR-web";
+    a.targetSource = ETargetSource::Deixis;
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, fixtureCtx(), cfg);
+    REQUIRE(p.ok);
+    CHECK(hasLine(p, "hyprctl dispatch moveworkspacetomonitor 4 XR-web"));
+    // A workspace move never touches a window.
+    for (auto& st : p.steps) {
+        const bool isMoveWindow = st.argv.size() >= 3 && st.argv[2] == "movewindow";
+        CHECK_FALSE(isMoveWindow);
+    }
+    std::string err;
+    for (auto& st : p.steps)
+        CHECK(validateStep(st, err));
+}
+
+TEST_CASE("executor: move_workspace refuses a dead monitor or a bad index") {
+    SExecConfig cfg;
+    SAction a; a.verb = EVerb::MoveWorkspace; a.workspace = 4; a.target = "XR-ghost";
+    CHECK_FALSE(planFor(a, fixtureCtx(), cfg).ok);
+    SAction b; b.verb = EVerb::MoveWorkspace; b.workspace = 0; b.target = "XR-web";
+    CHECK_FALSE(planFor(b, fixtureCtx(), cfg).ok);
+    // "active" is not a destination: the workspace would land somewhere unasked.
+    SAction c; c.verb = EVerb::MoveWorkspace; c.workspace = 4; c.target = "active";
+    CHECK_FALSE(planFor(c, fixtureCtx(), cfg).ok);
+}
+
+TEST_CASE("executor: create_monitor creates then places at the projected point") {
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-2";
+    a.gaze.valid = true;
+    a.gaze.place[0] = 0.1; a.gaze.place[1] = 1.4; a.gaze.place[2] = -1.5;
+    a.gaze.placeDistM = 1.3;
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, fixtureCtx(), cfg);
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 2);
+    CHECK(p.steps[0].argv[2] == "create");
+    CHECK(p.steps[0].argv[3] == "XR-2");
+    CHECK(hasLine(p, "hyprctl openxr place XR-2 at 0.100,1.400,-1.500"));
+    std::string err;
+    for (auto& st : p.steps)
+        CHECK(validateStep(st, err));
+}
+
+TEST_CASE("executor: create_monitor without a deixis just creates") {
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-2";
+    SExecConfig cfg;
+    SExecPlan p = planFor(a, fixtureCtx(), cfg);
+    REQUIRE(p.ok);
+    CHECK(p.steps.size() == 1);
+    CHECK(p.steps[0].argv[2] == "create");
+}
+
+TEST_CASE("executor: create_monitor refuses an existing or malformed name") {
+    SExecConfig cfg;
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-web"; // already live
+    CHECK_FALSE(planFor(a, fixtureCtx(), cfg).ok);
+    SAction b; b.verb = EVerb::CreateMonitor; b.target = "my monitor"; // never mintable
+    CHECK_FALSE(planFor(b, fixtureCtx(), cfg).ok);
+    SAction c; c.verb = EVerb::CreateMonitor; c.target = "";
+    CHECK_FALSE(planFor(c, fixtureCtx(), cfg).ok);
+    SExecConfig off; off.allowCreateMonitor = false;
+    SAction d; d.verb = EVerb::CreateMonitor; d.target = "XR-2";
+    CHECK_FALSE(planFor(d, fixtureCtx(), off).ok);
+}
+
+TEST_CASE("executor: validateStep pins the new argv shapes") {
+    std::string err;
+    CHECK(validateStep({{"hyprctl", "openxr", "create", "XR-2", "1920x1080@60"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "create", "my monitor", "1920x1080@60"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "create", "XR-2", "1920x1080"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "create", "XR-2"}, ""}, err));
+
+    CHECK(validateStep({{"hyprctl", "openxr", "place", "XR-2", "at", "0.100,1.400,-1.500"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "place", "XR-2", "at", "0.1 1.4 -1.5"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "place", "XR-2", "0.1,1.4,-1.5"}, ""}, err));
+
+    CHECK(validateStep({{"hyprctl", "dispatch", "moveworkspacetomonitor", "4", "XR-web"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "moveworkspacetomonitor", "0", "XR-web"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "moveworkspacetomonitor", "4", "XR web"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "moveworkspacetomonitor", "4"}, ""}, err));
 }

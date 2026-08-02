@@ -17,7 +17,7 @@ namespace {
         static const std::set<std::string> v = {
             "select", "anchor", "distance", "center", "adaptive",
             "dock", "undock", "roam", "gazegrab", "gazerelease",
-            "gazepush", "handinput", "place"};
+            "gazepush", "handinput", "place", "create"};
         return v;
     }
 
@@ -54,6 +54,49 @@ namespace {
 
     SExecStep step(std::vector<std::string> argv, std::string why) {
         return SExecStep{std::move(argv), std::move(why)};
+    }
+
+    // The ONE place an argv learns a 3D point. It reads `gaze.place` — the projected
+    // deixis point — and never `gaze.pos`, which is the head origin.
+    std::string gazePointArg(const SGazeResolution& g) {
+        return plainNum(g.place[0]) + "," + plainNum(g.place[1]) + "," + plainNum(g.place[2]);
+    }
+
+    // The shape of a name this daemon is allowed to CREATE: "XR-" + 1..3 digits. It is
+    // generated from the live snapshot (SDesktopContext::nextXrMonitorName), never
+    // spoken, and this re-check is the executor's own last line of defence.
+    bool isCreatableName(const std::string& n) {
+        if (n.rfind("XR-", 0) != 0 || n.size() < 4 || n.size() > 6)
+            return false;
+        for (size_t i = 3; i < n.size(); i++)
+            if (!std::isdigit(static_cast<unsigned char>(n[i])))
+                return false;
+        return true;
+    }
+
+    // "WxH@R" with all-numeric fields — the only mode shape we ever emit.
+    bool isModeToken(const std::string& m) {
+        size_t x = m.find('x'), at = m.find('@');
+        if (x == std::string::npos || at == std::string::npos || x == 0 || at < x + 2 || at + 1 >= m.size())
+            return false;
+        for (size_t i = 0; i < m.size(); i++) {
+            if (i == x || i == at)
+                continue;
+            if (!std::isdigit(static_cast<unsigned char>(m[i])))
+                return false;
+        }
+        return true;
+    }
+
+    // "x,y,z" with three plain decimal numbers — the only point shape we ever emit.
+    bool isPointToken(const std::string& p) {
+        int fields = 1;
+        for (char c : p) {
+            if (c == ',') { fields++; continue; }
+            if (!std::isdigit(static_cast<unsigned char>(c)) && c != '-' && c != '.')
+                return false;
+        }
+        return fields == 3 && p.size() <= 48;
     }
 }
 
@@ -116,9 +159,30 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
     // These drive Hyprland itself rather than the XR layer, so they sit ahead of the
     // allow_xrmonitor gate and of the monitor-target validation below.
     if (action.verb == EVerb::Workspace || action.verb == EVerb::Focus ||
-        action.verb == EVerb::Fullscreen || action.verb == EVerb::MoveWindow) {
+        action.verb == EVerb::Fullscreen || action.verb == EVerb::MoveWindow ||
+        action.verb == EVerb::MoveWorkspace) {
         if (!cfg.allowWindow) {
             plan.reason = "window control disabled (executor.allow_window=false)";
+            return plan;
+        }
+        // "move workspace 4 to this monitor". Both halves are ours: the index is a number
+        // WE parsed, the monitor a name enumerated from the live snapshot. There is no
+        // window in this verb at all, which is precisely why it exists — round 5's
+        // misfire came from a workspace phrase being read as a window reference.
+        if (action.verb == EVerb::MoveWorkspace) {
+            if (action.workspace < 1 || action.workspace > 99) {
+                plan.reason = "workspace index out of range — refusing";
+                return plan;
+            }
+            if (isActive(action.target) || !ctx.hasMonitor(action.target)) {
+                plan.reason = "target monitor '" + action.target + "' is not a live monitor — refusing";
+                return plan;
+            }
+            plan.ok = true;
+            plan.steps.push_back(step({"hyprctl", "dispatch", "moveworkspacetomonitor",
+                                       std::to_string(action.workspace), action.target},
+                                      "move workspace " + std::to_string(action.workspace) +
+                                          " to " + action.target));
             return plan;
         }
         if (action.verb == EVerb::Workspace) {
@@ -208,6 +272,39 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
         return plan;
     }
 
+    // "create a monitor here". The one verb whose target is deliberately NOT live yet, so
+    // it must sit ahead of the live-target validation below.
+    if (action.verb == EVerb::CreateMonitor) {
+        if (!cfg.allowCreateMonitor) {
+            plan.reason = "monitor creation disabled (executor.allow_create_monitor=false)";
+            return plan;
+        }
+        const std::string newName = action.target;
+        if (!isCreatableName(newName)) {
+            plan.reason = "generated monitor name '" + newName + "' is not of the form XR-<n> — refusing";
+            return plan;
+        }
+        if (ctx.hasMonitor(newName)) {
+            plan.reason = "monitor '" + newName + "' already exists — refusing";
+            return plan;
+        }
+        const std::string mode = ctx.newXrMonitorMode();
+        if (!isModeToken(mode)) {
+            plan.reason = "generated mode '" + mode + "' is malformed — refusing";
+            return plan;
+        }
+        plan.steps.push_back(step({"hyprctl", "openxr", "create", newName, mode},
+                                  "create " + newName + " (" + mode + ")"));
+        // "…here": drop the fresh monitor at the PROJECTED gaze point. Without a deixis
+        // the compositor's own default placement (in front, at default_distance) stands.
+        if (action.gaze.valid && action.gaze.placeDistM > 0.0) {
+            plan.steps.push_back(step({"hyprctl", "openxr", "place", newName, "at", gazePointArg(action.gaze)},
+                                      "place " + newName + " at gaze point"));
+        }
+        plan.ok = true;
+        return plan;
+    }
+
     const std::string name = concreteName(action, ctx);
     const bool        active = isActive(action.target);
     // A monitor verb with a named-but-not-live target is refused outright.
@@ -245,10 +342,15 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
         }
         case EVerb::Place: {
             std::string t = name.empty() ? "active" : name;
-            if (cfg.caps.placeAtPose && action.gaze.valid) {
-                std::string pose = plainNum(action.gaze.pos[0]) + "," +
-                                   plainNum(action.gaze.pos[1]) + "," +
-                                   plainNum(action.gaze.pos[2]);
+            // placeDistM > 0 is the structural proof that the point went through
+            // projectPlacePoint(). A hand-built or deserialized SGazeResolution that
+            // never did carries 0 and falls through to the freeze-in-place path rather
+            // than placing at the LOCAL_FLOOR origin.
+            if (cfg.caps.placeAtPose && action.gaze.valid && action.gaze.placeDistM > 0.0) {
+                // `place` (the PROJECTED deixis point), NEVER `pos` (the head origin).
+                // Passing pos is what dropped a monitor inside the user's head on the
+                // first live-fire round — see the SGazeResolution contract.
+                const std::string pose = gazePointArg(action.gaze);
                 plan.steps.push_back(step({"hyprctl", "openxr", "place", t, "at", pose},
                                           "place " + t + " at gaze point"));
             } else {
@@ -352,6 +454,20 @@ bool validateStep(const SExecStep& step, std::string& err) {
             err = "openxr verb '" + a[2] + "' not in allowlist";
             return false;
         }
+        // `create` and `place` carry data (a name we minted, a pixel mode, a 3D point),
+        // so their SHAPES are checked here too — the same treatment the dispatchers get.
+        if (a[2] == "create") {
+            if (a.size() != 5 || !isCreatableName(a[3]) || !isModeToken(a[4])) {
+                err = "create must be `openxr create XR-<n> <WxH@Hz>`";
+                return false;
+            }
+        }
+        if (a[2] == "place") {
+            if (a.size() != 6 || a[4] != "at" || !isPointToken(a[5])) {
+                err = "place must be `openxr place <name> at <x,y,z>`";
+                return false;
+            }
+        }
         // Reject any token that could smuggle shell/meta — we spawn without a shell,
         // but keep argv clean regardless. No newlines/NULs; names/modes/numbers only.
         for (auto& tok : a)
@@ -426,6 +542,30 @@ bool validateStep(const SExecStep& step, std::string& err) {
                     return false;
                 }
             }
+            return true;
+        }
+        if (a[2] == "moveworkspacetomonitor") {
+            // `moveworkspacetomonitor <1-99> <name>` — hyprctl joins the argv with
+            // spaces, which is exactly the two-token form the dispatcher parses
+            // (Hyprland src/config/legacy/DispatcherTranslator.cpp).
+            if (a.size() != 5 || a[3].empty() || a[3].size() > 2 || a[4].empty() || a[4].size() > 64) {
+                err = "moveworkspacetomonitor must be `moveworkspacetomonitor <1-99> <name>`";
+                return false;
+            }
+            for (char c : a[3])
+                if (!std::isdigit(static_cast<unsigned char>(c))) {
+                    err = "workspace index is not a number";
+                    return false;
+                }
+            if (a[3] == "0" || a[3] == "00") {
+                err = "workspace index must be >= 1";
+                return false;
+            }
+            for (char c : a[4])
+                if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_' && c != '.') {
+                    err = "moveworkspacetomonitor name has an unexpected character";
+                    return false;
+                }
             return true;
         }
         if (a[2] == "movetoworkspace" || a[2] == "workspace") {

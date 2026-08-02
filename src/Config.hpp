@@ -133,6 +133,12 @@ struct SConfig {
         int         deixisLeadMs   = 200; // gaze-leads-speech shift.
         int         deixisSamples  = 5;
         double      distanceStep   = 0.25; // "closer"/"further" step (m).
+        // Where "here" is. A deixis gives a head ORIGIN and a direction; the point the
+        // word designates is projected this far along the gaze ray (unless the
+        // compositor reports a real ray/monitor intersection). placeMinDistanceM is a
+        // hard floor so a monitor can never land inside the wearer's head.
+        double      placeDistanceM    = 1.3;
+        double      placeMinDistanceM = 0.5;
     } intent;
 
     // WP-V4 executor: typed command -> allowlisted hyprctl argv.
@@ -146,6 +152,9 @@ struct SConfig {
         // workspace. Non-destructive and reversible (nothing here can close, kill, or
         // move a window), so it is on by default — executor.dry_run still gates it.
         bool allowWindow    = true;
+        // "create a monitor here" -> `hyprctl openxr create XR-<n> <WxH@Hz>` (+ a place
+        // step when the utterance carried a deixis). Additive and undoable.
+        bool allowCreateMonitor = true;
     } executor;
 
     // Opt-in capture forensics. OFF unless dumpAudioDir is set; when it is, every

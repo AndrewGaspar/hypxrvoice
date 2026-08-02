@@ -118,3 +118,23 @@ TEST_CASE("config: audio dumping is OFF and window control is ON by default") {
     CHECK(c.vad.onsetBackpadMs == 300);
     CHECK(c.executor.allowWindow);
 }
+
+TEST_CASE("config: the round-5 placement + create knobs parse, with safe defaults") {
+    SConfig                  d;
+    std::vector<std::string> e0, w0;
+    REQUIRE(parseConfig("", d, e0, w0));
+    CHECK(d.intent.placeDistanceM == doctest::Approx(1.3));
+    CHECK(d.intent.placeMinDistanceM == doctest::Approx(0.5));
+    CHECK(d.executor.allowCreateMonitor);
+
+    const char* doc = "[intent]\nplace_distance_m = 2.0\nplace_min_distance_m = 0.75\n"
+                      "[executor]\nallow_create_monitor = false\n";
+    SConfig                  c;
+    std::vector<std::string> errs, warns;
+    REQUIRE(parseConfig(doc, c, errs, warns));
+    CHECK(errs.empty());
+    CHECK(warns.empty());
+    CHECK(c.intent.placeDistanceM == doctest::Approx(2.0));
+    CHECK(c.intent.placeMinDistanceM == doctest::Approx(0.75));
+    CHECK_FALSE(c.executor.allowCreateMonitor);
+}
