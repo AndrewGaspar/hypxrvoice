@@ -279,6 +279,8 @@ bool parseConfig(const std::string& text, SConfig& out, std::vector<std::string>
             setBool(out.executor.allowWindow, val);
         } else if (k == "executor.allow_create_monitor") {
             setBool(out.executor.allowCreateMonitor, val);
+        } else if (k == "executor.wait_monitor_ms") {
+            setInt(out.executor.waitMonitorMs, val);
         } else if (k == "debug.dump_audio_dir") {
             setStr(out.debug.dumpAudioDir, val);
         } else if (k == "debug.dump_audio_keep") {

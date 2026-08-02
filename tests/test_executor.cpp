@@ -512,3 +512,102 @@ TEST_CASE("executor: validateStep pins the new argv shapes") {
     CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "moveworkspacetomonitor", "4", "XR web"}, ""}, err));
     CHECK_FALSE(validateStep({{"hyprctl", "dispatch", "moveworkspacetomonitor", "4"}, ""}, err));
 }
+
+// ---------------------------------------------------------------------------
+// Round 6, Task B: a step may WAIT for a monitor an earlier step created.
+//
+// Live fire, 21:51: `openxr create XR-2 2560x1440@60` succeeded and the `openxr place
+// XR-2 at …` issued immediately after exited 1 ("step exited 1 — stopping plan"). The
+// identical pair at 22:07 succeeded. `create` returns once the compositor has accepted
+// the request, but the output is registered asynchronously — the place can beat it.
+//
+// The fix is a per-step PRECONDITION, not a create-specific sleep: any step may declare
+// the monitor it depends on, and runPlan holds it until the compositor agrees the name
+// exists (or refuses the step outright).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("executor: the place that follows a create waits for the monitor") {
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-2";
+    a.gaze.valid = true;
+    a.gaze.place[0] = 0.1; a.gaze.place[1] = 1.4; a.gaze.place[2] = -1.5;
+    a.gaze.placeDistM = 1.3;
+    SExecPlan p = planFor(a, fixtureCtx(), SExecConfig{});
+    REQUIRE(p.ok);
+    REQUIRE(p.steps.size() == 2);
+    CHECK(p.steps[0].waitForMonitor.empty());     // the create makes it; it cannot wait for it
+    CHECK(p.steps[1].waitForMonitor == "XR-2");
+    // The precondition is visible to the feedback tier / logs.
+    CHECK(p.toJson().find("\"waitFor\":\"XR-2\"") != std::string::npos);
+    // …and it changes no argv: the shapes are still exactly the allowlisted ones.
+    std::string err;
+    for (auto& st : p.steps)
+        CHECK_MESSAGE(validateStep(st, err), err);
+}
+
+TEST_CASE("executor: a waiting step polls until the monitor is live, then dispatches") {
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-2";
+    a.gaze.valid = true; a.gaze.place[2] = -1.5; a.gaze.placeDistM = 1.3;
+    SExecConfig cfg; cfg.dryRun = false;
+    SExecPlan   p = planFor(a, fixtureCtx(), cfg);
+    REQUIRE(p.ok);
+
+    std::vector<std::vector<std::string>> recorded;
+    RunFn rec = [&](const std::vector<std::string>& argv) { recorded.push_back(argv); return 0; };
+
+    int probes = 0, naps = 0, slept = 0;
+    // The monitor shows up on the third look — the race, reproduced.
+    MonitorProbeFn probe = [&](const std::string& n) { CHECK(n == "XR-2"); return ++probes >= 3; };
+    SleepFn        nap   = [&](int ms) { naps++; slept += ms; };
+
+    int n = runPlan(p, cfg, rec, probe, nap);
+    CHECK(n == 2);
+    REQUIRE(recorded.size() == 2);
+    CHECK(recorded[0][2] == "create");
+    CHECK(recorded[1][2] == "place");
+    CHECK(probes == 3);
+    CHECK(naps == 2);
+    CHECK(slept == 2 * cfg.waitPollMs);
+}
+
+TEST_CASE("executor: a monitor that never appears stops the plan instead of dispatching") {
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-2";
+    a.gaze.valid = true; a.gaze.place[2] = -1.5; a.gaze.placeDistM = 1.3;
+    SExecConfig cfg; cfg.dryRun = false; cfg.waitMonitorMs = 250; cfg.waitPollMs = 100;
+    SExecPlan   p = planFor(a, fixtureCtx(), cfg);
+
+    std::vector<std::vector<std::string>> recorded;
+    RunFn rec = [&](const std::vector<std::string>& argv) { recorded.push_back(argv); return 0; };
+    int   probes = 0, slept = 0;
+    MonitorProbeFn probe = [&](const std::string&) { probes++; return false; };
+    SleepFn        nap   = [&](int ms) { slept += ms; };
+
+    int n = runPlan(p, cfg, rec, probe, nap);
+    CHECK(n == 1);                       // the create ran; the place never did
+    REQUIRE(recorded.size() == 1);
+    CHECK(recorded[0][2] == "create");
+    CHECK(probes == 4);                  // one per poll, plus the final look after the budget
+    CHECK(slept == 250);                 // and never longer than the budget
+}
+
+TEST_CASE("executor: wait_monitor_ms=0 looks exactly once, and dry-run never probes") {
+    SAction a; a.verb = EVerb::CreateMonitor; a.target = "XR-2";
+    a.gaze.valid = true; a.gaze.place[2] = -1.5; a.gaze.placeDistM = 1.3;
+
+    SExecConfig off; off.dryRun = false; off.waitMonitorMs = 0;
+    SExecPlan   p = planFor(a, fixtureCtx(), off);
+    int         probes = 0, naps = 0;
+    RunFn       rec  = [&](const std::vector<std::string>&) { return 0; };
+    MonitorProbeFn pr = [&](const std::string&) { probes++; return true; };
+    SleepFn        np = [&](int) { naps++; };
+    CHECK(runPlan(p, off, rec, pr, np) == 2);
+    CHECK(probes == 1);
+    CHECK(naps == 0);
+
+    // Dry-run creates nothing, so waiting for the thing it did not create would only ever
+    // time out. It logs the precondition and moves on.
+    SExecConfig dry; dry.dryRun = true;
+    probes = 0; naps = 0;
+    CHECK(runPlan(planFor(a, fixtureCtx(), dry), dry, rec, pr, np) == 0);
+    CHECK(probes == 0);
+    CHECK(naps == 0);
+}

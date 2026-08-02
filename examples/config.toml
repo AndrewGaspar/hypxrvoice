@@ -194,6 +194,13 @@ allow_window = true
 # utterance carried a deixis). The name is minted by the daemon from the live monitor
 # list, never spoken. Additive and individually undoable (`hyprctl openxr destroy`).
 allow_create_monitor = true
+# A plan step may depend on a monitor an EARLIER step created. `openxr create` returns as
+# soon as the compositor accepts the request, but the output is registered asynchronously,
+# so the `place` that follows can arrive before the name exists (observed live: create+place
+# failed at 21:51, the identical pair succeeded at 22:07). The dependent step waits for the
+# monitor, polling every 100 ms, and refuses rather than dispatching at a name that never
+# appeared. 0 disables the wait.
+wait_monitor_ms = 2000
 
 # ---- capture forensics (OFF by default — turn on only while debugging) ----
 # Setting dump_audio_dir writes MICROPHONE AUDIO TO DISK: for every capture window, the

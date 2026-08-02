@@ -83,11 +83,12 @@ move, center, dock/undock, follow, anchor, hand input, launch, **create_monitor*
 "create a monitor here"); five drive plain Hyprland window management — **focus**
 ("focus the browser"), **fullscreen** ("make this window fullscreen"), **workspace**
 ("workspace three"), **move_window** ("move terminal to the left monitor", "send the
-browser to workspace 3"), and **move_workspace** ("move workspace 4 to this monitor").
+browser to workspace 3", "move Plex **here**"), and **move_workspace** ("move workspace 4
+to this monitor", "move workspace two **here**").
 The window verbs are non-destructive and reversible, so they are permitted by default
 (`executor.allow_window`).
 
-Two safety rules earned the hard way on the first non-dry-run round:
+Four safety rules earned the hard way on the non-dry-run rounds:
 
 - **A deixis designates a point in FRONT of you.** A gaze sample gives a head *origin*
   and a direction; `intent.place_distance_m` (default 1.3 m) projects along it and
@@ -99,6 +100,20 @@ Two safety rules earned the hard way on the first non-dry-run round:
   workspace **number slot** only, Whisper's predictable homophones are accepted
   (`for`/`forward`→4, `to`/`too`→2, `ate`→8, `won`→1, `tree`/`free`→3) — that is how
   "move workspace forward to this monitor" reaches `move_workspace 4`.
+- **A destination the verb cannot honor means it is not that verb.** "Move workspace two
+  **here**" and "move workspace 4 **in** this monitor" used to fall out of the move grammar
+  (which demanded "**to** \<monitor-ref\>") and land on the bare workspace **switch**, which
+  silently drops the destination — so they switched workspaces instead of moving one. The
+  destination prepositions are now `to`/`onto`/`on`/`in`/`at`/`over` plus a bare trailing
+  "here"/"there", and a workspace phrase carrying *any* destination remnant reads as the
+  move it is, even when the verb itself was mistranscribed ("*Re*move workspace 4 here").
+  An explicit "go to"/"switch to" still names its own verb.
+- **A bare direction word carries no magnitude.** "Move closer" means exactly
+  `intent.distance_step_m` (0.25 m), whichever backend produced the action — the local LLM
+  answered a bare "move closer" with `deltaM = -1.00`, which sailed through the old
+  [0.05, 1.0] sanity clamp and parked the monitor on top of the wearer. Only an utterance
+  that actually *speaks* a distance ("move it **half a meter** closer" — a unit word is
+  required) lets a backend's number through, and it is still clamped.
 
 - **Desktop-context snapshot** at utterance time — `hyprctl monitors -j` + `clients -j` +
   `-j openxr status` (all read-only) — enumerates live monitor names and the apps on
@@ -109,6 +124,18 @@ Two safety rules earned the hard way on the first non-dry-run round:
 - **Deixis** — "pick **this** up" / "place it **here**" is resolved at the timestamp of
   the deictic *word* via `hyprctl -j openxr gaze at <ms>`, over a lead-shifted stability
   window (gaze leads speech; ASR timestamps are noisy). One deictic per utterance.
+- **"…here" as a destination** — "move Plex **here**", "put the editor **here**", "move
+  workspace two **here**" (and the prepositional forms: "…**in**/**on**/**at**/**onto**
+  this monitor") send the subject to the MONITOR that was under gaze at the word,
+  the same answer "…to this monitor" gives (never the projected 3D place point — a window
+  and a workspace land on an *output*). Nothing under gaze is a Clarify — "look at the
+  target monitor" — never the active output, which is exactly where you were not looking.
+  The **one deictic per utterance** rule holds: a deictic subject beside a deictic
+  destination ("move **this here**") is declined rather than guessed, both because it asks
+  the ring for two different things at two different instants and because it is how the XR
+  place verb is spoken — "put **it** here" / "drop it here" / "put the coding **monitor**
+  here" keep their `place` reading. Say "move this **to this monitor**" to move the focused
+  window by gaze.
 - **Window references** — "the browser" / "the editor" / "the terminal" resolve through a
   small **closed** generic-noun table intersected with the LIVE window list, so a spoken
   noun can only ever select an app that is actually running. The chosen window is
@@ -125,6 +152,14 @@ Two safety rules earned the hard way on the first non-dry-run round:
   move destination must be `mon:<name>` over a boring charset), and transcript text is
   never interpolated into a command line. **`executor.dry_run` defaults true** — it logs the
   exact argv and actuates nothing until you flip it off.
+- **Step preconditions** — a plan step may declare a monitor it depends on
+  (`SExecStep::waitForMonitor`), and the runner holds it until the compositor reports that
+  name live (`executor.wait_monitor_ms`, default 2000, polled every 100 ms) or refuses the
+  step. `openxr create` returns as soon as the request is accepted while the output is
+  registered asynchronously, so the `place` issued in the same breath can beat it into
+  existence: live, a create+place pair failed at 21:51 ("step exited 1 — stopping plan")
+  and the identical pair succeeded at 22:07. The precondition belongs to the *step*, not to
+  the create verb, so anything later that depends on a monitor appearing says so the same way.
 
 Two spoken interactions need compositor verbs that don't exist yet (targeted grab,
 place-at-pose); the executor uses documented approximations behind capability flags and
@@ -388,7 +423,8 @@ sample rate), `[capture]` (`hold`, `preroll_ms` — see
 [Persistent capture](#persistent-capture--the-pre-roll-ring)), `[vad]` (thresholds),
 `[wake]` (phrase, backend), `[asr]` (model path,
 language, threads), `[intent]` (backend rule/llama, model, deixis window/lead),
-`[executor]` (**dry_run default true**, allow_launch, capability flags), `[apps]`
+`[executor]` (**dry_run default true**, allow_launch, capability flags,
+`wait_monitor_ms`), `[apps]`
 (launch allowlist), `[feedback]`, `[compositor]` (poll). Hot-reload with
 `hypxrvoicectl reload`.
 

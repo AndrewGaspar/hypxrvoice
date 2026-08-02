@@ -45,6 +45,11 @@ struct SRawIntent {
     std::string windowPhrase;           // spoken window reference ("the browser").
     std::string monitorPhrase;          // spoken monitor reference ("the coding monitor").
     ESpatialRef spatial = ESpatialRef::None;
+    // The destination was a bare trailing place-deixis ("move Plex HERE"). It resolves to
+    // the MONITOR under gaze at the deictic word's time — the same answer "…to this
+    // monitor" gives — and NEVER to the projected place point: a window and a workspace
+    // land on an OUTPUT, not at a 3D pose.
+    bool        destDeictic = false;
     double      confidence = 1.0;
     std::string note;
 };
@@ -53,8 +58,14 @@ struct SRawIntent {
 // grammar constrains deltaM to be *a number*, not a sane one — a live 3B run emitted
 // +100 for "closer" (wrong sign AND magnitude). Direction words in the utterance are
 // authoritative ("closer/nearer/bring" => negative, "further/farther/away/back/push"
-// => positive); magnitude is clamped to [0.05, 1.0] m, falling back to `step` when
-// the model's value is absent or absurd. Pure and unit-tested.
+// => positive).
+//
+// MAGNITUDE: a bare direction word names no amount, so it is ALWAYS `step` — a later
+// live round had the model answer bare "move closer" with -1.00 m, which the old
+// [0.05, 1.0] clamp waved through and which put the monitor on top of the wearer. Only an
+// utterance that actually SPEAKS a distance ("move it half a meter closer" — a unit word
+// is required) lets the backend's number through, still clamped to [0.05, 1.0] m.
+// Pure, idempotent, and applied by finalizeAction for every backend.
 double sanitizeDeltaM(double modelDelta, const std::string& utterance, double step);
 
 // A located deictic word: which instant to query the gaze ring at, and whether it is

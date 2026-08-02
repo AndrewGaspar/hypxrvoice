@@ -260,9 +260,34 @@ TEST_CASE("pipeline: an unmatched window phrase actuates NOTHING") {
 }
 
 TEST_CASE("pipeline: 'create a monitor here' creates and places at the projected point") {
+    // Round 6: the compositor registers the new output ASYNCHRONOUSLY, so `monitors -j`
+    // reports XR-2 only once the create has actually run — the shape of the 21:51 live
+    // failure, where the place beat the registration and exited 1. The place step now
+    // carries a wait-for-monitor precondition, so it lands either way.
     Harness h;
-    auto r = IntentPipeline::process(mk("create a monitor here"), h.cfg,
-                                     mockHyprctl(), mockGaze(-1, ""), h.runner);
+    bool    created = false;
+    QueryFn q       = [&](const std::vector<std::string>& argv) -> std::string {
+        for (auto& a : argv) {
+            if (a == "monitors")
+                return created ? R"json([
+                    {"id":0,"name":"eDP-1","focused":true},
+                    {"id":3,"name":"XR-code"},
+                    {"id":4,"name":"XR-web"},
+                    {"id":5,"name":"XR-2"}
+                ])json"
+                               : kMonitors;
+            if (a == "clients")
+                return kClients;
+        }
+        return kOpenxr;
+    };
+    RunFn run = [&](const std::vector<std::string>& argv) {
+        if (argv.size() > 2 && argv[2] == "create")
+            created = true;
+        return h.runner(argv);
+    };
+
+    auto r = IntentPipeline::process(mk("create a monitor here"), h.cfg, q, mockGaze(-1, ""), run);
     CHECK(r.action.verb == EVerb::CreateMonitor);
     CHECK(r.action.target == "XR-2");
     REQUIRE(r.plan.ok);
@@ -270,4 +295,59 @@ TEST_CASE("pipeline: 'create a monitor here' creates and places at the projected
     CHECK(h.ranLine("hyprctl openxr create XR-2 1920x1080@60"));
     // Head [0.5,1.4,-1.2] looking down -Z -> 1.3 m ahead.
     CHECK(h.ranLine("hyprctl openxr place XR-2 at 0.500,1.400,-2.500"));
+    CHECK(r.dispatched == 2);
+}
+
+TEST_CASE("pipeline: a created monitor that never registers refuses the place") {
+    // The other side of the race: if the output never appears, the place is NOT dispatched
+    // at a name the compositor does not know. wait_monitor_ms=0 keeps the test instant —
+    // one look, no polling.
+    Harness h;
+    h.cfg.executor.waitMonitorMs = 0;
+    auto r = IntentPipeline::process(mk("create a monitor here"), h.cfg,
+                                     mockHyprctl(), mockGaze(-1, ""), h.runner);
+    REQUIRE(r.plan.ok);
+    CHECK(h.ranLine("hyprctl openxr create XR-2 1920x1080@60"));
+    CHECK_FALSE(h.ranLine("hyprctl openxr place XR-2 at 0.500,1.400,-2.500"));
+    CHECK(r.dispatched == 1);
+}
+
+// ---- round 6: a bare trailing "here" is a monitor destination ----------------------
+
+TEST_CASE("pipeline: 'move Plex here' focuses the window then moves it to the gazed monitor") {
+    // The live utterance, end to end. It used to leave the pipeline as intent NONE.
+    const char* cls = R"json([
+        {"address":"0x9111","class":"Plex","title":"Batman Begins - Plex","monitor":3,
+         "mapped":true,"focusHistoryID":1},
+        {"address":"0x9222","class":"nvim","title":"main.cpp - NVIM","monitor":3,
+         "mapped":true,"focusHistoryID":0}
+    ])json";
+    Harness h;
+    auto r = IntentPipeline::process(mk("move Plex here"), h.cfg,
+                                     mockHyprctl(kMonitors, cls), mockGaze(4, "XR-web"), h.runner);
+    CHECK(r.action.verb == EVerb::MoveWindow);
+    CHECK(r.action.targetSource == ETargetSource::Deixis);
+    CHECK(h.ranLine("hyprctl dispatch focuswindow address:0x9111"));
+    CHECK(h.ranLine("hyprctl dispatch movewindow mon:XR-web"));
+}
+
+TEST_CASE("pipeline: 'move workspace two here' moves the workspace and never switches to it") {
+    Harness h;
+    auto r = IntentPipeline::process(mk("move workspace two here"), h.cfg,
+                                     mockHyprctl(), mockGaze(4, "XR-web"), h.runner);
+    CHECK(r.action.verb == EVerb::MoveWorkspace);
+    CHECK(h.ranLine("hyprctl dispatch moveworkspacetomonitor 2 XR-web"));
+    // The degradation the live round hit three times: a plain workspace SWITCH.
+    for (auto& v : h.ran)
+        CHECK(v[2] != "workspace");
+}
+
+TEST_CASE("pipeline: 'here' with no monitor under gaze actuates nothing") {
+    Harness h;
+    auto r = IntentPipeline::process(mk("move workspace two here"), h.cfg,
+                                     mockHyprctl(), mockGaze(-1, ""), h.runner);
+    CHECK(r.action.verb == EVerb::Clarify);
+    CHECK(r.action.clarifyQuestion == "look at the target monitor");
+    CHECK_FALSE(r.plan.ok);
+    CHECK(h.ran.empty());
 }

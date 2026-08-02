@@ -155,6 +155,10 @@ struct SConfig {
         // "create a monitor here" -> `hyprctl openxr create XR-<n> <WxH@Hz>` (+ a place
         // step when the utterance carried a deixis). Additive and undoable.
         bool allowCreateMonitor = true;
+        // How long (ms) a plan step may wait for a monitor it depends on to be registered
+        // by the compositor: `openxr create` returns once the request is accepted, so a
+        // `place` in the same plan can beat the output into existence. 0 disables the wait.
+        int  waitMonitorMs      = 2000;
     } executor;
 
     // Opt-in capture forensics. OFF unless dumpAudioDir is set; when it is, every

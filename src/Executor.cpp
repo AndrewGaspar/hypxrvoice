@@ -3,7 +3,9 @@
 
 #include <spawn.h>
 #include <sys/wait.h>
+#include <time.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <set>
@@ -116,6 +118,10 @@ std::string SExecPlan::toJson() const {
         }
         o += "],\"why\":";
         appendEscaped(o, steps[i].why);
+        if (!steps[i].waitForMonitor.empty()) {
+            o += ",\"waitFor\":";
+            appendEscaped(o, steps[i].waitForMonitor);
+        }
         o += "}";
     }
     o += "]}";
@@ -297,9 +303,16 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
                                   "create " + newName + " (" + mode + ")"));
         // "…here": drop the fresh monitor at the PROJECTED gaze point. Without a deixis
         // the compositor's own default placement (in front, at default_distance) stands.
+        //
+        // The place step WAITS for the monitor it names. `openxr create` returns once the
+        // request is accepted, but the output is registered asynchronously — on the live
+        // round a create+place pair failed at 21:51 ("step exited 1 — stopping plan") and
+        // the identical pair succeeded at 22:07, which is the signature of that race.
         if (action.gaze.valid && action.gaze.placeDistM > 0.0) {
-            plan.steps.push_back(step({"hyprctl", "openxr", "place", newName, "at", gazePointArg(action.gaze)},
-                                      "place " + newName + " at gaze point"));
+            SExecStep place = step({"hyprctl", "openxr", "place", newName, "at", gazePointArg(action.gaze)},
+                                   "place " + newName + " at gaze point");
+            place.waitForMonitor = newName;
+            plan.steps.push_back(std::move(place));
         }
         plan.ok = true;
         return plan;
@@ -608,7 +621,45 @@ int defaultRunner(const std::vector<std::string>& argv) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-int runPlan(const SExecPlan& plan, const SExecConfig& cfg, const RunFn& run) {
+bool defaultMonitorProbe(const std::string& name) {
+    // Read-only, and only the one query the precondition needs.
+    const std::string mons = defaultHyprctlQuery({"hyprctl", "monitors", "-j"});
+    return SDesktopContext::parse(mons, "", "").hasMonitor(name);
+}
+
+void defaultSleep(int ms) {
+    if (ms <= 0)
+        return;
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = static_cast<long>(ms % 1000) * 1000000L;
+    nanosleep(&ts, nullptr);
+}
+
+namespace {
+    // Poll until `name` is a live monitor, or the budget runs out. One probe always
+    // happens first: when the compositor already registered the output — the common
+    // case — nothing is slept at all.
+    bool awaitMonitor(const std::string& name, const SExecConfig& cfg,
+                      const MonitorProbeFn& probe, const SleepFn& nap) {
+        const MonitorProbeFn p = probe ? probe : MonitorProbeFn(defaultMonitorProbe);
+        const SleepFn        n = nap ? nap : SleepFn(defaultSleep);
+        const int            poll = std::max(1, cfg.waitPollMs);
+        int                  left = std::max(0, cfg.waitMonitorMs);
+        for (;;) {
+            if (p(name))
+                return true;
+            if (left <= 0)
+                return false;
+            const int slice = std::min(poll, left);
+            n(slice);
+            left -= slice;
+        }
+    }
+}
+
+int runPlan(const SExecPlan& plan, const SExecConfig& cfg, const RunFn& run,
+            const MonitorProbeFn& probe, const SleepFn& nap) {
     if (!plan.ok) {
         Log::log(Log::INFO, "executor: nothing to actuate ({})", plan.reason);
         return 0;
@@ -626,8 +677,16 @@ int runPlan(const SExecPlan& plan, const SExecConfig& cfg, const RunFn& run) {
             joined += t;
         }
         if (cfg.dryRun) {
+            if (!s.waitForMonitor.empty())
+                Log::log(Log::INFO, "executor[dry-run]: (would wait for monitor {})", s.waitForMonitor);
             Log::log(Log::INFO, "executor[dry-run]: {}  # {}", joined, s.why);
             continue;
+        }
+        // Precondition: the monitor this step names must exist before we dispatch at it.
+        if (!s.waitForMonitor.empty() && !awaitMonitor(s.waitForMonitor, cfg, probe, nap)) {
+            Log::log(Log::ERR, "executor: monitor '{}' did not appear within {} ms — stopping plan",
+                     s.waitForMonitor, cfg.waitMonitorMs);
+            return dispatched;
         }
         Log::log(Log::INFO, "executor: {}  # {}", joined, s.why);
         int rc = run(s.argv);

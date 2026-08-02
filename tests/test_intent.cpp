@@ -162,18 +162,54 @@ TEST_CASE("intent: ambiguous target keeps a best guess but marks low confidence"
     CHECK((a.target == "XR-a" || a.target == "XR-b"));
 }
 
-TEST_CASE("intent: sanitizeDeltaM — utterance direction is authoritative, magnitude clamped") {
+TEST_CASE("intent: sanitizeDeltaM — utterance direction is authoritative, magnitude is the step") {
     // The live bug: model said +100 for "closer" — direction flipped, magnitude reset.
     CHECK(sanitizeDeltaM(100.0, "move the coding monitor closer", 0.25) == doctest::Approx(-0.25));
-    // Sane model value with matching direction passes through (sign from utterance).
-    CHECK(sanitizeDeltaM(-0.1, "bring it closer", 0.25) == doctest::Approx(-0.1));
-    CHECK(sanitizeDeltaM(0.1, "push it further away", 0.25) == doctest::Approx(0.1));
+    // Round 6: a BARE direction word names no amount, so the configured step is the answer
+    // whatever number the backend attached. A 3B run answered bare "move closer" with
+    // -1.00 m — inside the old [0.05, 1.0] clamp, and it landed the monitor on the wearer.
+    CHECK(sanitizeDeltaM(-1.0, "move closer", 0.25) == doctest::Approx(-0.25));
+    CHECK(sanitizeDeltaM(-0.1, "bring it closer", 0.25) == doctest::Approx(-0.25));
+    CHECK(sanitizeDeltaM(0.9, "move further away", 0.25) == doctest::Approx(0.25));
+    CHECK(sanitizeDeltaM(0.1, "push it further away", 0.25) == doctest::Approx(0.25));
     // Model sign disagrees with the utterance: utterance wins.
-    CHECK(sanitizeDeltaM(0.3, "a bit closer please", 0.25) == doctest::Approx(-0.3));
-    // No direction word: model sign trusted, magnitude clamped.
+    CHECK(sanitizeDeltaM(0.3, "a bit closer please", 0.25) == doctest::Approx(-0.25));
+    // An amount the user actually SPOKE keeps the backend's number (still clamped). The
+    // unit word is the evidence that a quantity was asked for.
+    CHECK(sanitizeDeltaM(-0.5, "move it half a meter closer", 0.25) == doctest::Approx(-0.5));
+    CHECK(sanitizeDeltaM(0.75, "push it 75 centimeters away", 0.25) == doctest::Approx(0.75));
+    CHECK(sanitizeDeltaM(-9.0, "move it two meters closer", 0.25) == doctest::Approx(-0.25)); // absurd -> step
+    // An incidental number is not a spoken distance.
+    CHECK(sanitizeDeltaM(-1.0, "move monitor 2 closer", 0.25) == doctest::Approx(-0.25));
+    // No direction word: model sign trusted, magnitude is the step.
     CHECK(sanitizeDeltaM(-50.0, "adjust the distance", 0.25) == doctest::Approx(-0.25));
     // Zero/absent value: step magnitude, default pull.
     CHECK(sanitizeDeltaM(0.0, "adjust it", 0.25) == doctest::Approx(-0.25));
+    // A different configured step is honoured verbatim.
+    CHECK(sanitizeDeltaM(-1.0, "move closer", 0.4) == doctest::Approx(-0.4));
+    // Idempotent: finalize re-runs it over an action a backend already sanitized.
+    CHECK(sanitizeDeltaM(sanitizeDeltaM(-1.0, "move closer", 0.25), "move closer", 0.25) ==
+          doctest::Approx(-0.25));
+}
+
+TEST_CASE("intent: finalize pins the push/pull magnitude for EVERY backend") {
+    // A llama-style raw intent: the verb and a direction the model got right, and a
+    // magnitude it invented. finalizeAction is backend-agnostic, so the guard holds even
+    // when the raw intent never went through the rule grammar.
+    SRawIntent raw;
+    raw.verb   = EVerb::MoveDist;
+    raw.deltaM = -1.0;
+    raw.note   = "llama";
+    SAction a = finalizeAction(raw, mk("move closer"), fixture(), noGaze, icfg());
+    CHECK(a.verb == EVerb::MoveDist);
+    CHECK(a.deltaM == doctest::Approx(-0.25));
+
+    // …and a spoken amount still reaches the executor intact.
+    SRawIntent spoken;
+    spoken.verb   = EVerb::MoveDist;
+    spoken.deltaM = -0.5;
+    SAction b = finalizeAction(spoken, mk("move it half a meter closer"), fixture(), noGaze, icfg());
+    CHECK(b.deltaM == doctest::Approx(-0.5));
 }
 
 // ---- window management (round 2) ---------------------------------------------------
@@ -452,9 +488,19 @@ TEST_CASE("intent: the move grammar declines anything that is not one") {
     // "move this closer to me" would parse as a move-to-"me".
     CHECK(eng.detect(mk("move this closer to me")).verb == EVerb::MoveDist);
     CHECK(eng.detect(mk("move the coding monitor closer")).verb == EVerb::MoveDist);
-    CHECK(eng.detect(mk("put the editor here")).verb == EVerb::Place);
+    // Round 6 moved this one: "put THE EDITOR here" names a window AND a destination, so
+    // it is a window move. The XR place verb is what you say about the thing you are
+    // already holding — "put IT here" — and it keeps that reading (see the double-deixis
+    // test at the end of this file).
+    CHECK(eng.detect(mk("put the editor here")).verb == EVerb::MoveWindow);
+    CHECK(eng.detect(mk("put it here")).verb == EVerb::Place);
     CHECK(eng.detect(mk("bring it closer")).verb == EVerb::MoveDist);
     CHECK(eng.detect(mk("push it further away")).verb == EVerb::MoveDist);
+    // Round 6 widened the destination prepositions to in/at/onto. These are the near
+    // misses that must still NOT become moves: the destination has to name an output.
+    CHECK(eng.detect(mk("put it in front of me")).verb == EVerb::Center);
+    CHECK(eng.detect(mk("move it in front of me")).verb == EVerb::Center);
+    CHECK(eng.detect(mk("move it back")).verb == EVerb::MoveDist);
 }
 
 // ---------------------------------------------------------------------------
@@ -645,4 +691,274 @@ TEST_CASE("intent: create-monitor needs the noun to FOLLOW the creation verb") {
     CHECK(eng.detect(mk("create another monitor")).verb == EVerb::CreateMonitor);
     CHECK(eng.detect(mk("make me a new monitor here")).verb == EVerb::CreateMonitor);
     CHECK(eng.detect(mk("open a new monitor")).verb == EVerb::CreateMonitor);
+}
+
+// ---------------------------------------------------------------------------
+// Round 6, Task A: a bare trailing "here" is a MONITOR destination.
+//
+// Live fire, with a Plex window up on workspace 2:
+//   "Move WhatsApp to this monitor."  -> worked (the destination said "monitor")
+//   "Move Plex here." / "Move Batman here."  -> intent NONE
+//   "Move workspace two here." (x3)   -> degraded to the workspace SWITCH verb
+//   "Remove workspace 4 here."        -> ditto ('move' misheard as 'remove')
+// The window resolver was never at fault — it already reads class AND title tokens. The
+// destination grammar required "to <monitor-ref>", so a bare trailing "here" failed the
+// parse before any window was looked up.
+// ---------------------------------------------------------------------------
+
+namespace {
+    // The live shape of that evening: a laptop panel, two XR monitors, and a Plex window
+    // whose TITLE carries the media name (which is all "Move Batman here" has to go on).
+    SDesktopContext plexFixture() {
+        const char* mons = R"json([
+            {"id":0,"name":"eDP-1","focused":true,"x":0,"y":0,"width":1920,"height":1080},
+            {"id":3,"name":"XR-code","x":1920,"y":0,"width":1920,"height":1080},
+            {"id":4,"name":"XR-web","x":3840,"y":0,"width":1920,"height":1080}
+        ])json";
+        const char* cls = R"json([
+            {"class":"Plex","title":"Batman Begins - Plex","monitor":3,"mapped":true,
+             "address":"0xp1ex","focusHistoryID":2},
+            {"class":"nvim","title":"main.cpp - NVIM","monitor":3,"mapped":true,
+             "address":"0xbbb","focusHistoryID":0},
+            {"class":"firefox","title":"YouTube - Mozilla Firefox","monitor":4,"mapped":true,
+             "address":"0xccc","focusHistoryID":1}
+        ])json";
+        const char* xr = R"json({"state":"focused","monitors":[
+            {"name":"XR-code","id":3,"anchor":{"mode":"local"}},
+            {"name":"XR-web","id":4,"anchor":{"mode":"body"}}
+        ]})json";
+        return SDesktopContext::parse(mons, cls, xr);
+    }
+}
+
+TEST_CASE("intent: 'move Plex here' moves the window to the monitor under gaze") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move Plex here"), plexFixture(), gazeAt(4, "XR-web"));
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress == "0xp1ex");
+    CHECK(a.target == "XR-web");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+    // "here" names the MONITOR, not the projected place point — a window lands on an
+    // output, and nothing in this plan may read a 3D pose.
+    CHECK(a.workspace == 0);
+}
+
+TEST_CASE("intent: 'move Batman here' reaches the window through its live TITLE") {
+    // The other half of the live pair: "Batman" is nowhere in a window class, only in the
+    // Plex window's media title. The resolver has always scored title tokens; this pins
+    // that the new destination grammar actually gets there.
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move Batman here"), plexFixture(), gazeAt(3, "XR-code"));
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress == "0xp1ex");
+    CHECK(a.target == "XR-code");
+}
+
+TEST_CASE("intent: the bare-'here' destination in the phrasings people speak") {
+    CRuleIntent eng(icfg());
+    for (const char* said : {"move Plex here", "put Plex here", "send Plex here",
+                             "move Plex over here", "move Plex right here",
+                             "move Plex over there", "put Plex here please"}) {
+        SAction a = eng.resolve(mk(said), plexFixture(), gazeAt(4, "XR-web"));
+        CHECK_MESSAGE(a.verb == EVerb::MoveWindow, said);
+        CHECK_MESSAGE(a.windowAddress == "0xp1ex", said);
+        CHECK_MESSAGE(a.target == "XR-web", said);
+    }
+}
+
+TEST_CASE("intent: 'here' with nothing under gaze asks instead of guessing a monitor") {
+    // A gaze that landed on passthrough resolves no monitor. The one thing this must not
+    // do is fall back to the active/focused output — that is precisely where the user was
+    // NOT looking.
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move Plex here"), plexFixture(), gazeAt(-1, ""));
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.clarifyQuestion == "look at the target monitor");
+    CHECK(a.target.empty());
+    CHECK_FALSE(a.actionable());
+
+    // No gaze data at all (no compositor / no ring) is the same answer.
+    SAction b = eng.resolve(mk("move Plex here"), plexFixture(), noGaze);
+    CHECK(b.verb == EVerb::Clarify);
+    CHECK(b.clarifyQuestion == "look at the target monitor");
+}
+
+TEST_CASE("intent: an unmatched window is still refused when the destination is 'here'") {
+    CRuleIntent eng(icfg());
+    SAction a = eng.resolve(mk("move the spreadsheet here"), plexFixture(), gazeAt(4, "XR-web"));
+    CHECK(a.verb == EVerb::Clarify);
+    CHECK(a.windowAddress.empty());
+    CHECK_FALSE(a.actionable());
+}
+
+// The double deictic. The locked interaction model is content-first with ONE trailing
+// deictic resolved at word time; "move this here" asks for two, at two different instants,
+// for two different things. It is also exactly how the XR place verb is spoken, so reading
+// it as a window move would steal "put it here" / "drop it here" from Place to guess at a
+// window nobody named. Both decline, and "move this to this monitor" remains the way to
+// move the focused window by gaze — one deictic, on the destination.
+TEST_CASE("intent: a deictic subject next to a deictic destination is not a window move") {
+    CRuleIntent eng(icfg());
+    for (const char* said : {"move this here", "move it here", "send this over there"}) {
+        SAction a = eng.resolve(mk(said), plexFixture(), gazeAt(4, "XR-web"));
+        CHECK_MESSAGE(a.verb != EVerb::MoveWindow, said);
+        CHECK_MESSAGE(!a.actionable(), said);
+    }
+    // The XR place verb keeps every one of its phrasings.
+    CHECK(eng.detect(mk("put it here")).verb == EVerb::Place);
+    CHECK(eng.detect(mk("place this here")).verb == EVerb::Place);
+    CHECK(eng.detect(mk("drop it right here")).verb == EVerb::Place);
+    // …including when it names its monitor: a subject that SAYS it is an output is the
+    // place verb naming what it holds, not a window reference.
+    CHECK(eng.detect(mk("put the coding monitor here")).verb == EVerb::Place);
+    // And the single-deictic window move is untouched.
+    SAction a = eng.resolve(mk("move this to this monitor"), plexFixture(), gazeAt(4, "XR-web"));
+    CHECK(a.verb == EVerb::MoveWindow);
+    CHECK(a.windowAddress.empty()); // "the one I am using"
+    CHECK(a.target == "XR-web");
+}
+
+// ---- "move workspace N here" must never degrade to the SWITCH verb ------------------
+
+TEST_CASE("intent: 'move workspace two here' is a workspace MOVE, not a switch") {
+    CRuleIntent eng(icfg());
+    // The verb is decided by the grammar alone — no gaze is consulted at parse time — so
+    // the switch reading is gone whether or not the ring can answer.
+    SRawIntent r = eng.detect(mk("move workspace two here"));
+    CHECK(r.verb == EVerb::MoveWorkspace);
+    CHECK(r.workspace == 2);
+    CHECK(r.destDeictic);
+
+    SAction a = eng.resolve(mk("move workspace two here"), plexFixture(), gazeAt(3, "XR-code"));
+    CHECK(a.verb == EVerb::MoveWorkspace);
+    CHECK(a.workspace == 2);
+    CHECK(a.target == "XR-code");
+    CHECK(a.targetSource == ETargetSource::Deixis);
+
+    // With no usable gaze it ASKS. What it must never do is switch workspaces — the live
+    // round did that three times in a row.
+    SAction b = eng.resolve(mk("move workspace two here"), plexFixture(), noGaze);
+    CHECK(b.verb == EVerb::Clarify);
+    CHECK(b.clarifyQuestion == "look at the target monitor");
+    CHECK_FALSE(b.actionable());
+}
+
+TEST_CASE("intent: 'move workspace N here' — digit, number word, and homophone") {
+    CRuleIntent eng(icfg());
+    struct { const char* said; int want; } cases[] = {
+        {"move workspace 2 here",        2},
+        {"move workspace two here",      2},
+        {"move workspace to here",       2},  // Whisper's "two"
+        {"move workspace too here",      2},
+        {"move workspace four here",     4},
+        {"move workspace 4 here",        4},
+        {"move workspace for here",      4},  // Whisper's "four"
+        {"move workspace forward here",  4},
+        {"move workspace ate here",      8},
+        {"move workspace won here",      1},
+        {"move workspace tree here",     3},
+        {"move work space three here",   3},  // the ASR's split compound
+    };
+    for (auto& c : cases) {
+        SAction a = eng.resolve(mk(c.said), plexFixture(), gazeAt(3, "XR-code"));
+        CHECK_MESSAGE(a.verb == EVerb::MoveWorkspace, c.said);
+        CHECK_MESSAGE(a.workspace == c.want, c.said);
+        CHECK_MESSAGE(a.target == "XR-code", c.said);
+    }
+}
+
+TEST_CASE("intent: a trailing 'here' means the move VERB was lost, not that a switch was meant") {
+    // "Remove workspace 4 here." — Whisper's rendering of "move". No verb the move parser
+    // recognises survives, but the destination remnant does, and the switch verb has
+    // nowhere to put it.
+    CRuleIntent eng(icfg());
+    SRawIntent r = eng.detect(mk("remove workspace 4 here"));
+    CHECK(r.verb == EVerb::MoveWorkspace);
+    CHECK(r.workspace == 4);
+
+    SAction a = eng.resolve(mk("remove workspace 4 here"), plexFixture(), gazeAt(4, "XR-web"));
+    CHECK(a.verb == EVerb::MoveWorkspace);
+    CHECK(a.target == "XR-web");
+
+    // An EXPLICIT switch marker still names its own verb — a stray deictic must not
+    // override a verb the user actually spoke.
+    CHECK(eng.detect(mk("go to workspace three")).verb == EVerb::Workspace);
+    CHECK(eng.detect(mk("switch to workspace three here")).verb == EVerb::Workspace);
+    // …and an ordinary switch is untouched.
+    CHECK(eng.detect(mk("workspace three")).verb == EVerb::Workspace);
+    // A deictic that is NOT trailing is not a destination remnant.
+    CHECK(eng.detect(mk("put this here on workspace 3")).verb != EVerb::MoveWorkspace);
+}
+
+// ---------------------------------------------------------------------------
+// Round 6 addendum: destination prepositions beyond "to".
+//
+// Live fire: "Move workspace forward IN this monitor." degraded to a workspace switch —
+// the destination grammar accepted only "to", so the move parse failed and the switch
+// verb swallowed the phrase and dropped the destination. People say in / on / onto / at
+// interchangeably here, and every one of them still has to lead to something that NAMES
+// an output, so the wider set cannot invent a target.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("intent: every destination preposition reaches the same monitor") {
+    CRuleIntent eng(icfg());
+    for (const char* said : {"move workspace 4 to this monitor",
+                             "move workspace 4 in this monitor",
+                             "move workspace 4 on this monitor",
+                             "move workspace 4 onto this monitor",
+                             "move workspace 4 at this monitor",
+                             "move workspace 4 over to this monitor"}) {
+        SAction a = eng.resolve(mk(said), plexFixture(), gazeAt(3, "XR-code"));
+        CHECK_MESSAGE(a.verb == EVerb::MoveWorkspace, said);
+        CHECK_MESSAGE(a.workspace == 4, said);
+        CHECK_MESSAGE(a.target == "XR-code", said);
+    }
+    // The exact live utterance, with "forward" for "four".
+    SAction live = eng.resolve(mk("move workspace forward in this monitor"), plexFixture(),
+                               gazeAt(3, "XR-code"));
+    CHECK(live.verb == EVerb::MoveWorkspace);
+    CHECK(live.workspace == 4);
+    CHECK(live.target == "XR-code");
+
+    // …and the same for a window move, against a named/spatial destination.
+    for (const char* said : {"move Plex on the left monitor", "move Plex in the left monitor",
+                             "put Plex at the left monitor", "send Plex onto the left monitor"}) {
+        SAction a = eng.resolve(mk(said), plexFixture(), noGaze);
+        CHECK_MESSAGE(a.verb == EVerb::MoveWindow, said);
+        CHECK_MESSAGE(a.windowAddress == "0xp1ex", said);
+        CHECK_MESSAGE(a.target == "eDP-1", said); // leftmost by layout x
+    }
+}
+
+TEST_CASE("intent: a workspace phrase with ANY destination remnant never switches") {
+    CRuleIntent eng(icfg());
+    // The move verb was lost ("remove"), but the destination survived. Whatever the
+    // preposition, the one outcome that must not happen is a silent workspace switch.
+    for (const char* said : {"remove workspace 4 here",
+                             "remove workspace 4 to this monitor",
+                             "remove workspace 4 in this monitor",
+                             "remove workspace 4 on this monitor",
+                             "remove workspace 4 at this monitor",
+                             "workspace 4 in this monitor"}) {
+        SRawIntent r = eng.detect(mk(said));
+        CHECK_MESSAGE(r.verb == EVerb::MoveWorkspace, said);
+        CHECK_MESSAGE(r.workspace == 4, said);
+        SAction a = eng.resolve(mk(said), plexFixture(), gazeAt(4, "XR-web"));
+        CHECK_MESSAGE(a.verb == EVerb::MoveWorkspace, said);
+        CHECK_MESSAGE(a.target == "XR-web", said);
+        // …and with no destination resolvable it ASKS rather than switching.
+        SAction b = eng.resolve(mk(said), plexFixture(), noGaze);
+        CHECK_MESSAGE(b.verb == EVerb::Clarify, said);
+        CHECK_MESSAGE(!b.actionable(), said);
+    }
+    // A spatial remnant resolves against the layout, exactly like a parsed move.
+    SAction sp = eng.resolve(mk("remove workspace 4 on the left monitor"), plexFixture(), noGaze);
+    CHECK(sp.verb == EVerb::MoveWorkspace);
+    CHECK(sp.target == "eDP-1");
+
+    // A workspace phrase with NO destination is still a plain switch.
+    CHECK(eng.detect(mk("workspace three")).verb == EVerb::Workspace);
+    CHECK(eng.detect(mk("go to workspace three")).verb == EVerb::Workspace);
+    CHECK(eng.detect(mk("move to workspace three")).verb == EVerb::Workspace);
+    CHECK(eng.detect(mk("switch to workspace 4 on this monitor")).verb == EVerb::Workspace);
 }

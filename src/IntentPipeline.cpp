@@ -20,6 +20,7 @@ namespace IntentPipeline {
         ec.allowLaunch    = cfg.executor.allowLaunch;
         ec.allowWindow    = cfg.executor.allowWindow;
         ec.allowCreateMonitor = cfg.executor.allowCreateMonitor;
+        ec.waitMonitorMs  = cfg.executor.waitMonitorMs;
         ec.distanceStep   = cfg.intent.distanceStep;
         ec.appAllowlist   = cfg.apps;
         ec.caps.targetedGrab = cfg.executor.targetedGrab;
@@ -48,7 +49,15 @@ namespace IntentPipeline {
         // The transcript rides along so an unparseable utterance can be shown back to the
         // user instead of silently hiding the HUD (WP-V6 silent-rejection fix).
         Feedback::emitAction(r.action, r.plan, cfg, t.text);
-        r.dispatched = runPlan(r.plan, ec, runner);
+        // A step may wait for a monitor an earlier step created (`openxr create` accepts
+        // the request before the output is registered). The probe rides on the SAME
+        // injected compositor query the snapshot uses, so the pipeline stays hermetic in
+        // tests and asks the live compositor in the daemon.
+        MonitorProbeFn probe = [&contextQuery](const std::string& name) {
+            return SDesktopContext::parse(contextQuery({"hyprctl", "monitors", "-j"}), "", "")
+                .hasMonitor(name);
+        };
+        r.dispatched = runPlan(r.plan, ec, runner, probe);
         return r;
     }
 }

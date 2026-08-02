@@ -42,6 +42,14 @@ struct SExecConfig {
     // this is the finer-grained off switch.
     bool allowCreateMonitor = true;
     double distanceStep = 0.25; // default push/pull step (m) when the action gives none.
+    // A step may declare that a monitor must be LIVE before it runs (SExecStep::
+    // waitForMonitor). `openxr create` returns as soon as the compositor has accepted the
+    // request, but the output is registered asynchronously, so a `place` issued in the
+    // same breath can arrive before the name exists — that is the 21:51 create+place
+    // failure the 22:07 repeat did not reproduce. Total budget and poll interval, in ms;
+    // waitMonitorMs = 0 disables the precondition entirely.
+    int    waitMonitorMs = 2000;
+    int    waitPollMs    = 100;
     // Allowlist: spoken app key -> a TRUSTED launch command (operator config). The
     // command is passed to `hyprctl dispatch exec -- <cmd>` verbatim; it is never
     // derived from transcript text. Use the uwsm/systemd-run pattern, e.g.
@@ -53,6 +61,14 @@ struct SExecConfig {
 struct SExecStep {
     std::vector<std::string> argv; // e.g. {"hyprctl","openxr","anchor","XR-code","local"}
     std::string              why;  // short human note for logs/HUD.
+    // PRECONDITION (generic, declared per step): this monitor must be live before the
+    // step runs. runPlan polls the compositor for it and stops the plan with a clear
+    // reason if it never appears, rather than dispatching at a name that does not exist
+    // yet. The one producer today is the `place` that follows an `openxr create`, but the
+    // mechanism belongs to the step, not to the create verb — any later step that depends
+    // on a monitor coming into existence declares it the same way.
+    // (`= {}` so the many `SExecStep{argv, why}` brace-init call sites stay warning-free.)
+    std::string              waitForMonitor = {};
 };
 
 struct SExecPlan {
@@ -79,8 +95,24 @@ bool validateStep(const SExecStep& step, std::string& err);
 using RunFn = std::function<int(const std::vector<std::string>& argv)>;
 int  defaultRunner(const std::vector<std::string>& argv);
 
+// Is this monitor live RIGHT NOW? Used only to satisfy a step's waitForMonitor
+// precondition. Injectable so tests never touch a compositor; the default runs the
+// read-only `hyprctl monitors -j`.
+using MonitorProbeFn = std::function<bool(const std::string& name)>;
+bool defaultMonitorProbe(const std::string& name);
+
+// Sleep between polls. Injectable so the wait is instant (and deterministic) in tests.
+using SleepFn = std::function<void(int ms)>;
+void defaultSleep(int ms);
+
 // Execute a plan. In dry_run, logs each validated step and runs nothing. Otherwise
 // validates then runs each step in order, stopping on the first failure. Returns the
 // number of steps actually dispatched (0 in dry-run). Any step failing validation is a
 // hard stop (logged) — defence in depth.
-int runPlan(const SExecPlan& plan, const SExecConfig& cfg, const RunFn& run);
+//
+// A step carrying a `waitForMonitor` precondition is held until that monitor is live
+// (cfg.waitMonitorMs budget, cfg.waitPollMs interval); if it never appears the plan stops
+// with a logged reason and the step is NOT dispatched. `probe`/`nap` default to the live
+// hyprctl probe and a real sleep.
+int runPlan(const SExecPlan& plan, const SExecConfig& cfg, const RunFn& run,
+            const MonitorProbeFn& probe = {}, const SleepFn& nap = {});

@@ -126,6 +126,39 @@ namespace {
         return t == "monitor" || t == "screen" || t == "display";
     }
 
+    // Politeness/rhythm words that can sit after the last content word without changing
+    // what was said. Stripped only from the TAIL, so they never eat a real reference.
+    bool isTrailingFiller(const std::string& t) {
+        return t == "please" || t == "now" || t == "ok" || t == "okay" || t == "thanks";
+    }
+
+    // "here"/"there" — a PLACE deixis. Used as a destination it names the monitor the
+    // user was looking at when the word was spoken.
+    bool isPlaceDeicticWord(const std::string& t) { return t == "here" || t == "there"; }
+
+    // The prepositions that can introduce a move's destination. People do not consistently
+    // say "to": the live round produced "move workspace forward IN this monitor", which the
+    // to-only grammar dropped on the floor and the switch verb then swallowed. All of these
+    // read identically before an output reference, and none of them can introduce one
+    // without a destination phrase that still has to name an output (see parseMonitorDest),
+    // so widening the set cannot invent a target.
+    bool isDestPreposition(const std::string& t) {
+        return t == "to" || t == "onto" || t == "on" || t == "over" || t == "in" || t == "at";
+    }
+
+    // The index of a TRAILING "here"/"there" (ignoring trailing filler), or -1. Trailing
+    // is the whole point: "move Plex here" ends in a destination, whereas "put this here
+    // on workspace 3" does not — there the deictic is not the last thing said, so it is
+    // not a destination remnant.
+    int trailingPlaceDeictic(const std::vector<std::string>& toks) {
+        size_t i = toks.size();
+        while (i > 0 && isTrailingFiller(toks[i - 1]))
+            i--;
+        if (i == 0)
+            return -1;
+        return isPlaceDeicticWord(toks[i - 1]) ? static_cast<int>(i) - 1 : -1;
+    }
+
     // Find `joined` in `toks`, tolerating the ASR splitting the compound ("work space",
     // "full screen" — both show up often enough that matching only the joined form loses
     // the command outright). Returns the index just PAST the match, or -1.
@@ -145,9 +178,18 @@ namespace {
     // the words between verb and preposition, `dest` the destination words (determiners
     // stripped). Shared by the window-move and workspace-move parsers, which differ only
     // in what the SUBJECT is allowed to be.
+    //
+    // Round 6: a bare TRAILING "here"/"there" is a destination in its own right, with no
+    // preposition at all. "Move Plex here." and "Move workspace two here." were both
+    // spoken on the live round and both failed to parse — the first fell out of the
+    // grammar entirely, the second degraded to a workspace SWITCH — because the only
+    // destination shape accepted was "to <monitor-ref>". `destDeictic` reports that case
+    // so the caller resolves the destination through the gaze ring.
     bool splitMovePhrase(const std::vector<std::string>& toks, size_t& vi,
-                         std::vector<std::string>& subject, std::vector<std::string>& dest) {
+                         std::vector<std::string>& subject, std::vector<std::string>& dest,
+                         bool& destDeictic) {
         static const char* kVerbs[] = {"move", "put", "send", "throw", "drag", "shift"};
+        destDeictic = false;
         vi = toks.size();
         for (size_t i = 0; i < toks.size() && vi == toks.size(); i++)
             for (auto* v : kVerbs)
@@ -156,14 +198,42 @@ namespace {
             return false;
 
         // The preposition that introduces the destination.
-        size_t pi = toks.size();
+        const int trailingDeictic = trailingPlaceDeictic(toks);
+        size_t    pi              = toks.size();
         for (size_t i = vi + 1; i < toks.size(); i++)
-            if (toks[i] == "to" || toks[i] == "onto" || toks[i] == "on" || toks[i] == "over") {
+            if (isDestPreposition(toks[i])) {
+                // "move workspace TO here": the token sits in the workspace NUMBER SLOT
+                // and the whole remaining destination is a bare deixis, so this is
+                // Whisper's "two", not a preposition (the same reading workspaceNumber()
+                // already gives it, for the same reason: "workspace to here" is not a
+                // sentence anyone says). Any other shape — "move workspace to the left
+                // monitor" — keeps the prepositional reading.
+                if (i > 0 && toks[i - 1] == "workspace" && trailingDeictic == static_cast<int>(i) + 1)
+                    continue;
                 pi = i;
                 break;
             }
-        if (pi == toks.size())
-            return false;
+
+        if (pi == toks.size()) {
+            // No preposition. The utterance is only a move if it ENDS in a place-deixis;
+            // anything else ("move it closer") belongs to another verb.
+            const int ti = trailingDeictic;
+            if (ti < 0 || static_cast<size_t>(ti) <= vi)
+                return false;
+            size_t end = static_cast<size_t>(ti);
+            // "…right here", "…over here": a locative modifier of the deictic, never part
+            // of the subject's name.
+            while (end > vi + 1 &&
+                   (toks[end - 1] == "right" || toks[end - 1] == "over" || toks[end - 1] == "in"))
+                end--;
+            subject.assign(toks.begin() + static_cast<long>(vi) + 1, toks.begin() + static_cast<long>(end));
+            if (subject.empty())
+                return false;
+            dest.assign(1, toks[static_cast<size_t>(ti)]);
+            destDeictic = true;
+            return true;
+        }
+
         size_t d = pi + 1;
         if (d < toks.size() && toks[d] == "to")
             d++; // "over to the left monitor"
@@ -177,15 +247,29 @@ namespace {
         dest.assign(toks.begin() + static_cast<long>(d), toks.end());
         while (!dest.empty() && isDeterminer(dest.front()))
             dest.erase(dest.begin());
-        return !dest.empty();
+        while (!dest.empty() && isTrailingFiller(dest.back()))
+            dest.pop_back();
+        if (dest.empty())
+            return false;
+        // "…over here" / "…on there": the preposition led to a deixis, not to a name.
+        destDeictic = dest.size() == 1 && isPlaceDeicticWord(dest.front());
+        return true;
     }
 
-    // A MONITOR destination: spatial ("…to the left"), or a phrase that SAYS it is an
-    // output ("…to the coding monitor", "…to this monitor"). Fills r.spatial or
-    // r.monitorPhrase. False when the destination names no output at all — without that
-    // requirement "move this closer to me" parses as a move-to-"me", which is exactly the
-    // kind of confident nonsense the closed grammar exists to prevent.
-    bool parseMonitorDest(const std::vector<std::string>& dest, SRawIntent& r) {
+    // A MONITOR destination: spatial ("…to the left"), a phrase that SAYS it is an output
+    // ("…to the coding monitor", "…to this monitor"), or a bare place-deixis ("…here").
+    // Fills r.spatial / r.monitorPhrase / r.destDeictic. False when the destination names
+    // no output at all — without that requirement "move this closer to me" parses as a
+    // move-to-"me", which is exactly the kind of confident nonsense the closed grammar
+    // exists to prevent.
+    bool parseMonitorDest(const std::vector<std::string>& dest, bool destDeictic, SRawIntent& r) {
+        if (destDeictic) {
+            // "…here" resolves against the gaze ring in finalize, exactly as "…to this
+            // monitor" does: the MONITOR that was under gaze at word time. It is NOT the
+            // projected place point — a window and a workspace land on an output.
+            r.destDeictic = true;
+            return true;
+        }
         if (dest.front() == "left" || dest.front() == "leftmost")
             r.spatial = ESpatialRef::Left;
         else if (dest.front() == "right" || dest.front() == "rightmost")
@@ -207,6 +291,35 @@ namespace {
         return true;
     }
 
+    // Does the tail from `from` carry a DESTINATION — a trailing "here"/"there", or a
+    // preposition introducing something that names an output? Used by the workspace
+    // SWITCH branch, which cannot honor a destination at all: if one is present, the
+    // utterance is a move whose verb the ASR lost, not a switch. Fills `r` with whichever
+    // destination it found, so finalize resolves it exactly like a parsed move.
+    bool parseTrailingDestination(const std::vector<std::string>& toks, size_t from, SRawIntent& r) {
+        if (const int ti = trailingPlaceDeictic(toks); ti >= static_cast<int>(from)) {
+            r.destDeictic = true;
+            return true;
+        }
+        for (size_t i = from; i < toks.size(); i++) {
+            if (!isDestPreposition(toks[i]))
+                continue;
+            size_t d = i + 1;
+            if (d < toks.size() && toks[d] == "to")
+                d++;
+            std::vector<std::string> dest(toks.begin() + static_cast<long>(d), toks.end());
+            while (!dest.empty() && isDeterminer(dest.front()))
+                dest.erase(dest.begin());
+            while (!dest.empty() && isTrailingFiller(dest.back()))
+                dest.pop_back();
+            if (dest.empty())
+                continue;
+            if (parseMonitorDest(dest, false, r))
+                return true;
+        }
+        return false;
+    }
+
     // "move workspace <N> to <monitor>" — relocate a WHOLE workspace onto another output.
     // Checked BEFORE the window move: the subject here is a workspace index, and letting
     // it fall through to the window parser is what turned a misheard "move workspace 4"
@@ -216,8 +329,9 @@ namespace {
     // three" keeps its existing reading, because there "workspace" is the destination.
     bool parseWorkspaceMove(const std::vector<std::string>& toks, SRawIntent& r) {
         size_t                   vi = 0;
+        bool                     destDeictic = false;
         std::vector<std::string> subject, dest;
-        if (!splitMovePhrase(toks, vi, subject, dest))
+        if (!splitMovePhrase(toks, vi, subject, dest, destDeictic))
             return false;
 
         const int wsAt = findCompound(subject, "workspace", "work", "space");
@@ -227,7 +341,7 @@ namespace {
         // thing; declining leaves it unparsed rather than guessing.
         if (findCompound(dest, "workspace", "work", "space") >= 0)
             return false;
-        if (!parseMonitorDest(dest, r))
+        if (!parseMonitorDest(dest, destDeictic, r))
             return false;
 
         // The number slot (homophone-tolerant — see workspaceNumber). Absent is
@@ -266,45 +380,6 @@ namespace {
         return false;
     }
 
-    // "move/put/send <window> to <destination>" — the one command that names a WINDOW and
-    // a place to put it. Returns true only when BOTH halves parsed; the caller then treats
-    // the utterance as a window move and skips the rest of the keyword chain.
-    bool parseWindowMove(const std::vector<std::string>& toks, SRawIntent& r) {
-        size_t                   vi = 0;
-        std::vector<std::string> subject, dest;
-        if (!splitMovePhrase(toks, vi, subject, dest))
-            return false;
-
-        // A WORKSPACE is never a window. "move workspace forward to this monitor" must
-        // never reach the window resolver — the phrase either belongs to the workspace-move
-        // verb (checked first) or is a mis-parse, and both are better than operating on
-        // whatever window happens to be focused.
-        if (findCompound(subject, "workspace", "work", "space") >= 0)
-            return false;
-
-        std::string win;
-        for (auto& t : subject) {
-            if (!win.empty()) win += ' ';
-            win += t;
-        }
-        if (win.empty())
-            return false;
-
-        // A workspace destination: "…to workspace three". No number is underspecified,
-        // not out of scope — finalize turns that into a Clarify.
-        if (int wsAt = findCompound(dest, "workspace", "work", "space"); wsAt >= 0) {
-            r.windowPhrase = win;
-            r.sub          = "workspace";
-            r.workspace    = std::max(0, scanWorkspaceIndex(dest, wsAt));
-            return true;
-        }
-
-        if (!parseMonitorDest(dest, r))
-            return false;
-        r.windowPhrase = win;
-        return true;
-    }
-
     // Is this window phrase a bare DEIXIS ("this", "that", "it", "this window")? Those
     // legitimately mean "the window I am using", so they keep the focused-window reading.
     // Everything else — any phrase with content words in it — must MATCH a live window or
@@ -328,6 +403,86 @@ namespace {
         }
         return sawDeictic;
     }
+
+    // "move/put/send <window> to <destination>" — the one command that names a WINDOW and
+    // a place to put it. Returns true only when BOTH halves parsed; the caller then treats
+    // the utterance as a window move and skips the rest of the keyword chain.
+    bool parseWindowMove(const std::vector<std::string>& toks, SRawIntent& r) {
+        size_t                   vi = 0;
+        bool                     destDeictic = false;
+        std::vector<std::string> subject, dest;
+        if (!splitMovePhrase(toks, vi, subject, dest, destDeictic))
+            return false;
+
+        // A WORKSPACE is never a window. "move workspace forward to this monitor" must
+        // never reach the window resolver — the phrase either belongs to the workspace-move
+        // verb (checked first) or is a mis-parse, and both are better than operating on
+        // whatever window happens to be focused.
+        if (findCompound(subject, "workspace", "work", "space") >= 0)
+            return false;
+
+        std::string win;
+        for (auto& t : subject) {
+            if (!win.empty()) win += ' ';
+            win += t;
+        }
+        if (win.empty())
+            return false;
+
+        // Round 6. A bare-"here" destination makes this a WINDOW move only when the
+        // subject actually names a window. Two subjects are declined outright, and both
+        // fall through to the keyword chain that already reads them correctly:
+        //
+        //  * A BARE DEIXIS — "put it here", "place this here", "move this here". That is
+        //    two deictics in one utterance, which the locked interaction model does not
+        //    have (content-first semantic refs, ONE trailing deictic resolved at word
+        //    time), and it is exactly how the XR place verb is spoken. Swallowing it here
+        //    would steal "put it here" from Place — a verb the user issues daily — to
+        //    guess at a window nobody named. "Move this to this monitor" remains the way
+        //    to move the focused window by gaze: one deictic, at the destination.
+        //  * A subject that SAYS it is an output — "put the coding monitor here". That is
+        //    the XR place verb naming its monitor, not a window reference.
+        if (destDeictic) {
+            if (isDeicticWindowPhrase(win))
+                return false;
+            for (auto& t : subject)
+                if (isMonitorNoun(t))
+                    return false;
+        }
+
+        // A workspace destination: "…to workspace three". No number is underspecified,
+        // not out of scope — finalize turns that into a Clarify.
+        if (int wsAt = findCompound(dest, "workspace", "work", "space"); wsAt >= 0) {
+            r.windowPhrase = win;
+            r.sub          = "workspace";
+            r.workspace    = std::max(0, scanWorkspaceIndex(dest, wsAt));
+            return true;
+        }
+
+        if (!parseMonitorDest(dest, destDeictic, r))
+            return false;
+        r.windowPhrase = win;
+        return true;
+    }
+
+}
+
+namespace {
+    // Did the user actually SPEAK a distance? A spoken amount always carries a UNIT.
+    // Requiring the unit is what keeps an incidental number ("move monitor 2 closer")
+    // from being read as a magnitude, and it is the only evidence that an amount was
+    // asked for at all.
+    bool utteranceNamesADistance(const std::string& utterance) {
+        static const char* kUnits[] = {
+            "meter", "meters", "metre", "metres", "cm", "cms",
+            "centimeter", "centimeters", "centimetre", "centimetres",
+            "inch", "inches", "foot", "feet"};
+        for (auto& t : words(utterance))
+            for (auto* u : kUnits)
+                if (t == u)
+                    return true;
+        return false;
+    }
 }
 
 double sanitizeDeltaM(double modelDelta, const std::string& utterance, double step) {
@@ -336,10 +491,20 @@ double sanitizeDeltaM(double modelDelta, const std::string& utterance, double st
     for (char c : utterance)
         low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-    // Magnitude: model value if sane, else the configured step.
-    double mag = std::abs(modelDelta);
-    if (mag < 0.05 || mag > 1.0)
-        mag = std::abs(step) > 0.0 ? std::abs(step) : 0.25;
+    const double fallback = std::abs(step) > 0.0 ? std::abs(step) : 0.25;
+
+    // Magnitude. A bare direction word ("move closer") names no amount, so it is ALWAYS
+    // the configured step — whatever number the backend attached. Live: a 3B run answered
+    // bare "move closer" with deltaM=-1.00, which passed the old [0.05, 1.0] clamp and put
+    // the monitor on top of the user. The clamp only governs an amount the user actually
+    // spoke ("move it half a meter closer"), where the model is reporting a quantity rather
+    // than inventing one.
+    double mag = fallback;
+    if (utteranceNamesADistance(utterance)) {
+        mag = std::abs(modelDelta);
+        if (mag < 0.05 || mag > 1.0)
+            mag = fallback;
+    }
 
     // Direction: the utterance is authoritative when it contains a direction word.
     auto has = [&](const char* w) { return low.find(w) != std::string::npos; };
@@ -432,6 +597,28 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
     const int wsIndex = scanWorkspaceIndex(toks, wsAt);
 
     if (wsAt >= 0) {
+        // Round 6. A DESTINATION after the workspace token — a trailing "here"/"there", or
+        // any preposition leading to an output ("…in this monitor", "…on the left screen")
+        // — is something the switch verb cannot honor: it would drop the destination and
+        // switch anyway. The live round did exactly that, four times: "move workspace two
+        // here" (x3) and "move workspace forward IN this monitor" all became switches. The
+        // move parsers above have already had their chance at this utterance; reaching here
+        // with a destination remnant means the move VERB was lost in transcription
+        // ("*Re*move workspace 4 here"), not that a switch was meant — so read it as the
+        // move it is, and let finalize ask when the destination cannot be resolved. An
+        // EXPLICIT switch marker still wins: "go to workspace 3" names its verb outright,
+        // and a stray remnant must not override a verb the user actually spoke.
+        const bool switchMarker = contains(text, "go to") || contains(text, "switch to") ||
+                                  contains(text, "take me to");
+        SRawIntent dst;
+        if (!switchMarker && parseTrailingDestination(toks, static_cast<size_t>(wsAt), dst)) {
+            setVerb(EVerb::MoveWorkspace, "workspace-move (destination remnant, move verb lost)");
+            r.workspace     = wsIndex >= 0 ? wsIndex : 0;
+            r.spatial       = dst.spatial;
+            r.monitorPhrase = dst.monitorPhrase;
+            r.destDeictic   = dst.destDeictic;
+            return r;
+        }
         // A "workspace" with no number is underspecified, not out of scope — finalize
         // turns workspace 0 into a Clarify rather than guessing at an index.
         setVerb(EVerb::Workspace, "workspace keyword");
@@ -529,6 +716,14 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
     a.note       = raw.note;
     a.utterance  = t.text;
 
+    // The push/pull magnitude is settled HERE, for every backend, because a backend is
+    // exactly what got it wrong: a bare "move closer" came back from the local LLM as
+    // deltaM=-1.00 and landed the monitor on the wearer. sanitizeDeltaM is idempotent, so
+    // running it again over a rule-backend action (which already carries ±distance_step_m)
+    // changes nothing.
+    if (raw.verb == EVerb::MoveDist)
+        a.deltaM = sanitizeDeltaM(raw.deltaM, t.text, cfg.distanceStep);
+
     if (raw.verb == EVerb::None) {
         a.note = raw.note.empty() ? "no command recognized" : raw.note;
         return a;
@@ -611,9 +806,14 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
             a.confidence   = gz.stable ? std::min(a.confidence, 0.9) : 0.6;
             return true;
         }
+        // "…here" with no monitor under gaze at word time. Say what would fix it, and
+        // never guess: the active monitor is precisely where the user did NOT look.
         a.verb            = EVerb::Clarify;
-        a.clarifyQuestion = raw.monitorPhrase.empty() ? "move it where?"
-                                                      : "I don't see " + raw.monitorPhrase;
+        if (raw.destDeictic)
+            a.clarifyQuestion = "look at the target monitor";
+        else
+            a.clarifyQuestion = raw.monitorPhrase.empty() ? "move it where?"
+                                                          : "I don't see " + raw.monitorPhrase;
         a.confidence      = 0.3;
         return false;
     };

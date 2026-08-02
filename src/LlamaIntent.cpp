@@ -221,9 +221,11 @@ SAction CLlamaIntent::resolve(const STranscript& t, const SDesktopContext& ctx,
         raw.deictic      = true;
         raw.targetPhrase.clear();
     }
-    // The grammar constrains deltaM to be a number, not a sane one — validate the
-    // model's push/pull against the utterance's own direction words + a magnitude
-    // clamp (live 3B run emitted +100 for "closer").
+    // The grammar constrains deltaM to be a number, not a sane one — validate the model's
+    // push/pull against the utterance's own direction words + the magnitude rule (live 3B
+    // runs emitted +100 for "closer", then -1.00 m for a bare "move closer"). finalizeAction
+    // applies the same function to EVERY backend; doing it here too keeps the raw intent
+    // that gets logged honest, and sanitizeDeltaM is idempotent.
     if (raw.verb == EVerb::MoveDist)
         raw.deltaM = sanitizeDeltaM(raw.deltaM, t.text, icfg.distanceStep);
     SAction a = finalizeAction(raw, t, ctx, gazeQuery, icfg);

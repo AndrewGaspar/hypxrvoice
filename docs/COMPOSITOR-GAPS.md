@@ -163,3 +163,13 @@ runtime-created monitors are never touched by config reconciliation), and
 `dispatch moveworkspacetomonitor <N> <name>`. Read side:
 `monitors -j`, `clients -j`, `-j openxr status`, and `-j openxr gaze at <ms>` — all
 read-only, all shipping.
+
+**`create` is accepted before the output exists.** `openxr create` returns as soon as the
+compositor takes the request; the monitor is registered asynchronously, so a `place
+<newname> …` issued in the same plan can arrive before that name resolves. Observed live:
+`create XR-2 2560x1440@60` + `place XR-2 at …` failed at 21:51 ("step exited 1 — stopping
+plan") and the identical pair succeeded at 22:07. This is fixed daemon-side rather than
+counted as a gap: the dependent step declares `SExecStep::waitForMonitor` and `runPlan`
+polls `monitors -j` for the name (`executor.wait_monitor_ms`, default 2000, every 100 ms)
+before dispatching, refusing the step if it never appears. A synchronous `create` — or a
+create reply that lands only once the output is registered — would let the wait go away.
