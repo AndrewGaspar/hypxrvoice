@@ -81,7 +81,8 @@ std::string CLlamaIntent::buildPrompt(const STranscript& t, const SDesktopContex
          "monitor), place (drop/put it down), move_dist (closer/further; set deltaM "
          "negative for closer, positive for further), center, dock, undock, follow "
          "(have it follow me), anchor (world-lock or head/body), hand_input (hands "
-         "on/off), launch_app (open an app), focus (focus a running app's window), "
+         "on/off), monitor_view (hide/show every XR monitor; set sub to off/on/toggle), "
+         "launch_app (open an app), focus (focus a running app's window), "
          "fullscreen (toggle fullscreen on a window), workspace (switch to a numbered "
          "workspace — put the number in `workspace`).\n";
     p += "For focus/fullscreen put the spoken app name in `app` (e.g. \"browser\"), not "

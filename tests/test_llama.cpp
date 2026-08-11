@@ -16,6 +16,7 @@ TEST_CASE("grammar: enumerates live monitor names and the closed verb set") {
     // The verb rule lists the schema verbs.
     CHECK(g.find("move_dist") != std::string::npos);
     CHECK(g.find("launch_app") != std::string::npos);
+    CHECK(g.find("monitor_view") != std::string::npos);
     CHECK(g.find("root ::=") != std::string::npos);
     // "active" is always an allowed target.
     CHECK(g.find("active") != std::string::npos);
@@ -77,4 +78,5 @@ TEST_CASE("llama: buildPrompt injects the digest and the transcript") {
     CHECK(p.find("XR-code") != std::string::npos);
     CHECK(p.find("move the coding monitor closer") != std::string::npos);
     CHECK(p.find("Verbs:") != std::string::npos);
+    CHECK(p.find("monitor_view") != std::string::npos);
 }

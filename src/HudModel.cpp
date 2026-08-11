@@ -26,6 +26,7 @@ static const char* verbGerund(EVerb v) {
         case EVerb::Follow:    return "following";
         case EVerb::Anchor:    return "anchoring";
         case EVerb::HandInput: return "hands";
+        case EVerb::MonitorView: return "monitor view";
         case EVerb::LaunchApp: return "opening";
         case EVerb::Focus:      return "focusing";
         case EVerb::Fullscreen: return "fullscreen";
@@ -57,6 +58,13 @@ std::string hudActionPhrase(const SAction& a) {
         if (!a.sub.empty())
             phrase += " " + a.sub;
         return phrase;
+    }
+    if (a.verb == EVerb::MonitorView) {
+        if (a.sub == "off")
+            return "hiding monitor view";
+        if (a.sub == "on")
+            return "showing monitor view";
+        return "toggling monitor view";
     }
     if (a.verb == EVerb::Workspace)
         return "workspace " + std::to_string(a.workspace);

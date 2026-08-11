@@ -130,6 +130,24 @@ TEST_CASE("executor: hand input toggle needs no monitor target") {
     CHECK(hasLine(p, "hyprctl openxr handinput off"));
 }
 
+TEST_CASE("executor: monitor view accepts only the closed global sub-actions") {
+    for (const char* sub : {"on", "off", "toggle"}) {
+        SAction a; a.verb = EVerb::MonitorView; a.sub = sub;
+        SExecConfig cfg;
+        SExecPlan p = planFor(a, fixtureCtx(), cfg);
+        REQUIRE(p.ok);
+        CHECK(hasLine(p, std::string("hyprctl openxr view ") + sub));
+    }
+
+    SAction bad; bad.verb = EVerb::MonitorView; bad.sub = "auto";
+    CHECK_FALSE(planFor(bad, fixtureCtx(), SExecConfig{}).ok);
+
+    std::string err;
+    CHECK(validateStep({{"hyprctl", "openxr", "view", "toggle"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "view", "auto"}, ""}, err));
+    CHECK_FALSE(validateStep({{"hyprctl", "openxr", "view"}, ""}, err));
+}
+
 TEST_CASE("executor: launch is refused unless enabled AND allowlisted") {
     SAction a; a.verb = EVerb::LaunchApp; a.app = "browser";
     SExecConfig off; // allowLaunch=false

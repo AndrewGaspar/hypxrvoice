@@ -620,6 +620,22 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
     const int wsAt = findCompound(toks, "workspace", "work", "space");
     const int fsAt = findCompound(toks, "fullscreen", "full", "screen");
 
+    // Global monitor presentation switch. Require the exact subject phrase "monitor
+    // view": broad "hide"/"show" commands are too easy to confuse with windows, the
+    // HUD, or individual monitors. Idempotent on/off phrasings are preferred in-headset;
+    // toggle remains available for parity with the keyboard bind.
+    if (contains(text, "monitor view") &&
+        (hasToken(toks, "hide") || hasToken(toks, "show") || hasToken(toks, "toggle"))) {
+        setVerb(EVerb::MonitorView, "monitor-view keyword");
+        if (hasToken(toks, "hide"))
+            r.sub = "off";
+        else if (hasToken(toks, "show"))
+            r.sub = "on";
+        else
+            r.sub = "toggle";
+        return r;
+    }
+
     // Window MOVES are checked first: they are the only shape that names a window AND a
     // destination, and both "workspace" and the XR distance verbs would otherwise swallow
     // one ("move the terminal to workspace three" is not a workspace switch). The parse
@@ -788,7 +804,7 @@ SAction finalizeAction(const SRawIntent& raw, const STranscript& t,
     }
 
     // Verbs with no monitor target.
-    if (raw.verb == EVerb::HandInput) {
+    if (raw.verb == EVerb::HandInput || raw.verb == EVerb::MonitorView) {
         a.targetSource = ETargetSource::None;
         return a;
     }

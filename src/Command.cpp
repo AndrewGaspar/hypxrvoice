@@ -18,6 +18,7 @@ const char* verbName(EVerb v) {
         case EVerb::Follow:    return "follow";
         case EVerb::Anchor:    return "anchor";
         case EVerb::HandInput: return "hand_input";
+        case EVerb::MonitorView: return "monitor_view";
         case EVerb::LaunchApp: return "launch_app";
         case EVerb::Focus:      return "focus";
         case EVerb::Fullscreen: return "fullscreen";
@@ -41,6 +42,7 @@ EVerb verbFromName(const std::string& s) {
     if (s == "follow")     return EVerb::Follow;
     if (s == "anchor")     return EVerb::Anchor;
     if (s == "hand_input") return EVerb::HandInput;
+    if (s == "monitor_view") return EVerb::MonitorView;
     if (s == "launch_app") return EVerb::LaunchApp;
     if (s == "focus")      return EVerb::Focus;
     if (s == "fullscreen") return EVerb::Fullscreen;

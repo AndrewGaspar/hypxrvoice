@@ -51,6 +51,13 @@ TEST_CASE("hud: action phrase is terse and verb-appropriate") {
     SAction act; act.verb = EVerb::Center; act.target = "active";
     CHECK(hudActionPhrase(act) == "centering"); // implicit "active" is not appended
 
+    SAction view; view.verb = EVerb::MonitorView; view.sub = "off";
+    CHECK(hudActionPhrase(view) == "hiding monitor view");
+    view.sub = "on";
+    CHECK(hudActionPhrase(view) == "showing monitor view");
+    view.sub = "toggle";
+    CHECK(hudActionPhrase(view) == "toggling monitor view");
+
     SAction c; c.verb = EVerb::Clarify; c.clarifyQuestion = "which firefox?";
     CHECK(hudActionPhrase(c) == "which firefox?");
 }

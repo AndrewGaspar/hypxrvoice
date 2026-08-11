@@ -19,7 +19,7 @@ namespace {
         static const std::set<std::string> v = {
             "select", "anchor", "distance", "center", "adaptive",
             "dock", "undock", "roam", "gazegrab", "gazerelease",
-            "gazepush", "handinput", "place", "create"};
+            "gazepush", "handinput", "view", "place", "create"};
         return v;
     }
 
@@ -440,6 +440,16 @@ SExecPlan planFor(const SAction& action, const SDesktopContext& ctx, const SExec
             plan.ok = true;
             break;
         }
+        case EVerb::MonitorView: {
+            const std::string s = action.sub.empty() ? "toggle" : action.sub;
+            if (s != "on" && s != "off" && s != "toggle") {
+                plan.reason = "monitor view sub-action must be on|off|toggle";
+                return plan;
+            }
+            plan.steps.push_back(step({"hyprctl", "openxr", "view", s}, "monitor view " + s));
+            plan.ok = true;
+            break;
+        }
         default:
             plan.reason = "verb not executable";
             return plan;
@@ -478,6 +488,12 @@ bool validateStep(const SExecStep& step, std::string& err) {
         if (a[2] == "place") {
             if (a.size() != 6 || a[4] != "at" || !isPointToken(a[5])) {
                 err = "place must be `openxr place <name> at <x,y,z>`";
+                return false;
+            }
+        }
+        if (a[2] == "view") {
+            if (a.size() != 4 || (a[3] != "on" && a[3] != "off" && a[3] != "toggle")) {
+                err = "view must be `openxr view on|off|toggle`";
                 return false;
             }
         }

@@ -77,6 +77,20 @@ TEST_CASE("intent: keyword grammar detects verbs and deixis") {
     CHECK(f.verb == EVerb::HandInput);
     CHECK(f.sub == "off");
 
+    SRawIntent viewOff = eng.detect(mk("hide monitor view"));
+    CHECK(viewOff.verb == EVerb::MonitorView);
+    CHECK(viewOff.sub == "off");
+    SRawIntent viewOn = eng.detect(mk("show monitor view"));
+    CHECK(viewOn.verb == EVerb::MonitorView);
+    CHECK(viewOn.sub == "on");
+    SRawIntent viewToggle = eng.detect(mk("toggle monitor view"));
+    CHECK(viewToggle.verb == EVerb::MonitorView);
+    CHECK(viewToggle.sub == "toggle");
+
+    // Broad show/hide speech must not actuate this global switch.
+    CHECK(eng.detect(mk("hide the browser")).verb == EVerb::None);
+    CHECK(eng.detect(mk("show my desktop")).verb == EVerb::None);
+
     // Out of scope: no command keyword.
     SRawIntent g = eng.detect(mk("what is the weather today"));
     CHECK(g.verb == EVerb::None);

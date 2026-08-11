@@ -26,6 +26,7 @@ enum class EVerb {
     Follow,     // "have X follow me" — adaptive/roam decorator.
     Anchor,     // "anchor it to my head/body" / "world-lock it".
     HandInput,  // "hands on/off" — conditional hand-input toggle.
+    MonitorView, // "hide/show/toggle monitor view" — global XR quad presentation gate.
     LaunchApp,  // "open the browser" — allowlisted desktop-entry launch.
 
     // ---- plain window management (round-2: the phrasings the user actually spoke) ----

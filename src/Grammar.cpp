@@ -34,6 +34,7 @@ namespace Grammar {
              "\"\\\"place\\\"\" | \"\\\"move_dist\\\"\" | \"\\\"center\\\"\" | "
              "\"\\\"dock\\\"\" | \"\\\"undock\\\"\" | \"\\\"follow\\\"\" | "
              "\"\\\"anchor\\\"\" | \"\\\"hand_input\\\"\" | \"\\\"launch_app\\\"\" | "
+             "\"\\\"monitor_view\\\"\" | "
              "\"\\\"focus\\\"\" | \"\\\"fullscreen\\\"\" | \"\\\"workspace\\\"\" | "
              "\"\\\"move_window\\\"\" | \"\\\"move_workspace\\\"\" | "
              "\"\\\"create_monitor\\\"\"\n";

@@ -77,10 +77,10 @@ values are directly comparable.
 
 ### Intent tier + executor (WP-V4)
 
-Each transcript is turned into a **typed, closed-schema command** (`SAction`, 18 verbs)
+Each transcript is turned into a **typed, closed-schema command** (`SAction`, 19 verbs)
 and then an allowlisted `hyprctl` plan. Thirteen verbs drive the XR layer (pick, place,
 move, center, dock/undock, follow, anchor, hand input, launch, **create_monitor** —
-"create a monitor here"); five drive plain Hyprland window management — **focus**
+"create a monitor here"), plus **monitor_view** ("hide/show/toggle monitor view"); five drive plain Hyprland window management — **focus**
 ("focus the browser"), **fullscreen** ("make this window fullscreen"), **workspace**
 ("workspace three"), **move_window** ("move terminal to the left monitor", "send the
 browser to workspace 3", "move Plex **here**"), and **move_workspace** ("move workspace 4
