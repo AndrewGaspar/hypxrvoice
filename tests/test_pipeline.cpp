@@ -98,15 +98,15 @@ TEST_CASE("pipeline: 'pick this monitor up' -> targeted head-carry of the gazed 
     CHECK(h.ranLine("hyprctl openxr anchor XR-web head"));
 }
 
-TEST_CASE("pipeline: 'hide monitor view' -> global compositor presentation gate") {
-    Harness h;
-    auto r = IntentPipeline::process(mk("hide monitor view"), h.cfg,
-                                     mockHyprctl(), mockGaze(-1, ""), h.runner);
-    CHECK(r.action.verb == EVerb::MonitorView);
-    CHECK(r.action.targetSource == ETargetSource::None);
-    CHECK(r.action.sub == "off");
-    CHECK(r.plan.ok);
-    CHECK(h.ranLine("hyprctl openxr view off"));
+TEST_CASE("pipeline: 'hide monitors' -> global compositor presentation gate") {
+  Harness h;
+  auto r = IntentPipeline::process(mk("hide monitors"), h.cfg, mockHyprctl(),
+                                   mockGaze(-1, ""), h.runner);
+  CHECK(r.action.verb == EVerb::MonitorView);
+  CHECK(r.action.targetSource == ETargetSource::None);
+  CHECK(r.action.sub == "off");
+  CHECK(r.plan.ok);
+  CHECK(h.ranLine("hyprctl openxr view off"));
 }
 
 TEST_CASE("pipeline: 'pick this up' uses the targeted grab verb when advertised") {

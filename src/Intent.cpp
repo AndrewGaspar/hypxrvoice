@@ -39,6 +39,22 @@ namespace {
         return false;
     }
 
+    bool hasTokenPair(const std::vector<std::string> &toks, const char *first,
+                      const char *second) {
+      for (size_t i = 1; i < toks.size(); ++i)
+        if (toks[i - 1] == first && toks[i] == second)
+          return true;
+      return false;
+    }
+
+    bool hasNegation(const std::vector<std::string> &toks) {
+      if (hasToken(toks, "not") || hasToken(toks, "never") ||
+          hasToken(toks, "dont"))
+        return true;
+      return hasTokenPair(toks, "don",
+                          "t"); // words("don't") splits at the apostrophe.
+    }
+
     // Command keywords that must not leak into a semantic target phrase.
     bool isCommandWord(const std::string& t) {
         static const char* kw[] = {
@@ -620,20 +636,28 @@ SRawIntent CRuleIntent::detect(const STranscript& t) const {
     const int wsAt = findCompound(toks, "workspace", "work", "space");
     const int fsAt = findCompound(toks, "fullscreen", "full", "screen");
 
-    // Global monitor presentation switch. Require the exact subject phrase "monitor
-    // view": broad "hide"/"show" commands are too easy to confuse with windows, the
-    // HUD, or individual monitors. Idempotent on/off phrasings are preferred in-headset;
-    // toggle remains available for parity with the keyboard bind.
-    if (contains(text, "monitor view") &&
-        (hasToken(toks, "hide") || hasToken(toks, "show") || hasToken(toks, "toggle"))) {
-        setVerb(EVerb::MonitorView, "monitor-view keyword");
-        if (hasToken(toks, "hide"))
-            r.sub = "off";
-        else if (hasToken(toks, "show"))
-            r.sub = "on";
-        else
-            r.sub = "toggle";
-        return r;
+    // Global monitor presentation switch. Require either the exact subject
+    // phrase "monitor view" or its natural plural shorthand "monitors": broad
+    // "hide"/"show" commands are too easy to confuse with windows, the HUD, or
+    // individual monitors. Idempotent on/off phrasings are preferred
+    // in-headset; toggle remains available for parity with the keyboard bind.
+    const bool viewHide = hasToken(toks, "hide");
+    const bool viewShow = hasToken(toks, "show");
+    const bool viewToggle = hasToken(toks, "toggle");
+    const int viewActionCount = static_cast<int>(viewHide) +
+                                static_cast<int>(viewShow) +
+                                static_cast<int>(viewToggle);
+    const bool hasMonitorViewSubject =
+        hasTokenPair(toks, "monitor", "view") || hasToken(toks, "monitors");
+    if (hasMonitorViewSubject && viewActionCount == 1 && !hasNegation(toks)) {
+      setVerb(EVerb::MonitorView, "monitor-view keyword");
+      if (viewHide)
+        r.sub = "off";
+      else if (viewShow)
+        r.sub = "on";
+      else
+        r.sub = "toggle";
+      return r;
     }
 
     // Window MOVES are checked first: they are the only shape that names a window AND a

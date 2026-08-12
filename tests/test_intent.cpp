@@ -86,10 +86,24 @@ TEST_CASE("intent: keyword grammar detects verbs and deixis") {
     SRawIntent viewToggle = eng.detect(mk("toggle monitor view"));
     CHECK(viewToggle.verb == EVerb::MonitorView);
     CHECK(viewToggle.sub == "toggle");
+    SRawIntent monitorsOff = eng.detect(mk("hide monitors"));
+    CHECK(monitorsOff.verb == EVerb::MonitorView);
+    CHECK(monitorsOff.sub == "off");
+    SRawIntent monitorsOn = eng.detect(mk("show monitors"));
+    CHECK(monitorsOn.verb == EVerb::MonitorView);
+    CHECK(monitorsOn.sub == "on");
+    SRawIntent monitorsToggle = eng.detect(mk("toggle monitors"));
+    CHECK(monitorsToggle.verb == EVerb::MonitorView);
+    CHECK(monitorsToggle.sub == "toggle");
 
     // Broad show/hide speech must not actuate this global switch.
     CHECK(eng.detect(mk("hide the browser")).verb == EVerb::None);
     CHECK(eng.detect(mk("show my desktop")).verb == EVerb::None);
+    CHECK(eng.detect(mk("hide monitor viewpoint")).verb == EVerb::None);
+    CHECK(eng.detect(mk("don't hide monitor view")).verb == EVerb::None);
+    CHECK(eng.detect(mk("don't hide monitors")).verb == EVerb::None);
+    CHECK(eng.detect(mk("show and hide monitor view")).verb == EVerb::None);
+    CHECK(eng.detect(mk("show and hide monitors")).verb == EVerb::None);
 
     // Out of scope: no command keyword.
     SRawIntent g = eng.detect(mk("what is the weather today"));
